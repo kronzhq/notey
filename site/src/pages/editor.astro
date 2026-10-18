@@ -1,0 +1,626 @@
+---
+const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content" />
+    <title>Notey</title>
+    <link rel="icon" type="image/png" href={`${base}/notepad.png`} />
+    <meta name="description" content="Notey in the browser. Plain text, saved locally." />
+    <link rel="preload" href={`${base}/fonts/Lilex-Regular.woff2`} as="font" type="font/woff2" crossorigin />
+    <style set:html={`
+      @font-face { font-family: Lilex; font-weight: 400; font-display: swap; src: url(${base}/fonts/Lilex-Regular.woff2) format("woff2"); }
+      @font-face { font-family: Lilex; font-weight: 500; font-display: swap; src: url(${base}/fonts/Lilex-Medium.woff2) format("woff2"); }
+      @font-face { font-family: Lilex; font-weight: 700; font-display: swap; src: url(${base}/fonts/Lilex-Bold.woff2) format("woff2"); }
+    `} />
+  </head>
+  <body>
+    <!-- Same stack as the app's render(): tab bar, menu bar, editor (+ preview), status bar. -->
+    <div id="tabs" role="tablist"></div>
+
+    <div id="menubar">
+      <div id="menus"></div>
+      <button id="preview-toggle" class="icon" hidden></button>
+    </div>
+
+    <div id="findbar" hidden>
+      <input id="find" placeholder="Find" aria-label="Find" />
+      <input id="replace" placeholder="Replace" aria-label="Replace" />
+      <button id="find-prev" title="Previous (Shift+F3)">↑</button>
+      <button id="find-next" title="Next (F3)">↓</button>
+      <button id="replace-one" class="r">Replace</button>
+      <button id="replace-all" class="r">All</button>
+      <button id="find-close" title="Close (Esc)">×</button>
+    </div>
+
+    <main>
+      <textarea id="text" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Editor"></textarea>
+      <article id="preview" class="md" hidden></article>
+    </main>
+
+    <footer id="status">
+      <span id="pos"></span>
+      <span id="zoom"></span>
+      <span id="eol"></span>
+      <span>UTF-8</span>
+    </footer>
+
+    <div id="print" class="md"></div>
+    <input id="file" type="file" multiple hidden />
+
+    <script>
+      import { marked } from "marked";
+
+      const KEY = "notey-web";
+      const ICONS = { close: "M18 6 6 18M6 6l12 12", plus: "M12 5v14M5 12h14", eye: "M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z", eyeOff: "M3 3l18 18M10.6 5.1A10 10 0 0 1 12 5c6.4 0 10 7 10 7a17 17 0 0 1-3.2 4M6.6 6.6C3.8 8.4 2 12 2 12s3.6 7 10 7c1.9 0 3.6-.6 5-1.5M9.9 9.9a3 3 0 0 0 4.2 4.2" };
+      const icon = (d: string) => `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="${d}"/></svg>`;
+      const $ = (id: string) => document.getElementById(id) as any;
+      const text: HTMLTextAreaElement = $("text");
+      const preview: HTMLElement = $("preview");
+      const findbar: HTMLElement = $("findbar");
+      const findInput: HTMLInputElement = $("find");
+      const replaceInput: HTMLInputElement = $("replace");
+      const fileInput: HTMLInputElement = $("file");
+      const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
+      const mod = (k: string) => (isMac ? "⌘" : "Ctrl+") + k;
+
+      // Raw HTML in a file shows as text, so an opened file can't run script here.
+      const escape = (s: string) => s.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+      marked.use({ renderer: { html: ({ text }) => escape(text) } });
+
+      type Tab = { name: string; text: string; crlf?: boolean; dirty?: boolean; preview?: boolean };
+      type State = { tabs: Tab[]; active: number; wrap: boolean; status: boolean; zoom: number };
+      const WELCOME = "# Notey\n\nMarkdown files get a live preview beside the editor. The eye button in the top-right corner hides or shows it.\n\nEverything stays in this browser. **File > Save** downloads the file.\n\n## Shortcuts\n\n| Action         | Keys              |\n| -------------- | ----------------- |\n| New tab        | Alt+N             |\n| Open / Save    | Cmd+O / Cmd+S     |\n| Close tab      | Alt+W             |\n| Switch tabs    | Alt+] / Alt+[     |\n| Find / Replace | Cmd+F / Cmd+Alt+F |\n| Go to line     | Cmd+G             |\n| Time/date      | F5                |\n| Zoom           | Cmd+= / Cmd+- / Cmd+0 |\n";
+      let state: State | null = null;
+      try { state = JSON.parse(localStorage.getItem(KEY)!); } catch {}
+      const s: State = state ?? { tabs: [{ name: "Welcome.md", text: WELCOME, preview: true }], active: 0, wrap: true, status: true, zoom: 100 };
+
+      const persist = () => { try { localStorage.setItem(KEY, JSON.stringify(s)); } catch {} };
+      const cur = () => s.tabs[s.active];
+      const isMd = (t: Tab) => /\.(md|markdown)$/i.test(t.name);
+
+      // ---- Tabs ----
+      function renderTabs() {
+        const tabs = s.tabs.map((t, i) => {
+          const el = document.createElement("div");
+          el.className = "tab" + (i === s.active ? " active" : "");
+          el.setAttribute("role", "tab");
+          el.innerHTML = `<span class="label"></span>${t.dirty ? "<span>•</span>" : ""}<button class="icon" title="Close tab">${icon(ICONS.close)}</button>`;
+          el.firstChild!.textContent = t.name;
+          el.onmousedown = (e) => { if (e.button === 1) { e.preventDefault(); closeTab(i); } };
+          el.onclick = () => select(i);
+          (el.lastChild as HTMLElement).onclick = (e) => { e.stopPropagation(); closeTab(i); };
+          return el;
+        });
+        const plus = document.createElement("div");
+        plus.className = "tab-end";
+        plus.innerHTML = `<button class="icon" title="New tab">${icon(ICONS.plus)}</button>`;
+        plus.firstChild!.addEventListener("click", () => addTab());
+        $("tabs").replaceChildren(...tabs, plus);
+        document.querySelector(".tab.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+      }
+
+      function render() {
+        renderTabs();
+        const t = cur();
+        text.value = t.text;
+        text.wrap = s.wrap ? "soft" : "off";
+        document.title = `${t.name} - Notey`;
+        document.body.style.setProperty("--font", `${15 * s.zoom / 100}px`);
+        $("status").hidden = !s.status;
+        const md = isMd(t);
+        const toggle = $("preview-toggle");
+        toggle.hidden = !md;
+        toggle.innerHTML = icon(t.preview ? ICONS.eyeOff : ICONS.eye);
+        toggle.title = t.preview ? "Hide preview" : "Show preview";
+        preview.hidden = !(md && t.preview);
+        renderPreview();
+        updateStatus();
+      }
+
+      function renderPreview() {
+        if (!preview.hidden) preview.innerHTML = marked.parse(cur().text) as string;
+      }
+
+      function updateStatus() {
+        const before = text.value.slice(0, text.selectionStart).split("\n");
+        $("pos").textContent = `Ln ${before.length}, Col ${before.at(-1)!.length + 1}`;
+        $("zoom").textContent = `${s.zoom}%`;
+        $("eol").textContent = cur().crlf ? "Windows (CRLF)" : "Unix (LF)";
+      }
+
+      function select(i: number) { s.active = i; persist(); render(); text.focus(); }
+      function addTab(name = "Untitled", body = "", crlf = false) {
+        const t: Tab = { name, text: body, crlf };
+        t.preview = isMd(t);
+        s.tabs.push(t);
+        select(s.tabs.length - 1);
+      }
+      function closeTab(i = s.active) {
+        const t = s.tabs[i];
+        if (t.dirty && t.text && !confirm(`Close "${t.name}"? Changes that weren't saved will be lost.`)) return;
+        s.tabs.splice(i, 1);
+        if (!s.tabs.length) s.tabs.push({ name: "Untitled", text: "" });
+        select(Math.min(i <= s.active ? Math.max(0, s.active - 1) : s.active, s.tabs.length - 1));
+      }
+      const cycle = (step: number) => select((s.active + step + s.tabs.length) % s.tabs.length);
+
+      // ---- File ----
+      async function openFiles(files: Iterable<File>) {
+        for (const f of files) {
+          const raw = await f.text();
+          addTab(f.name, raw.replace(/\r\n/g, "\n"), raw.includes("\r\n"));
+        }
+      }
+      function save() {
+        const t = cur();
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(new Blob([t.crlf ? t.text.replace(/\n/g, "\r\n") : t.text], { type: "text/plain" }));
+        a.download = /\.\w+$/.test(t.name) ? t.name : `${t.name}.txt`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href));
+        t.dirty = false;
+        persist();
+        renderTabs();
+      }
+      function saveAs() {
+        const name = prompt("Save as", cur().name);
+        if (!name) return;
+        cur().name = name;
+        render();
+        save();
+      }
+
+      // ---- Edit ----
+      // execCommand keeps edits on the textarea's own undo stack.
+      function insert(str: string) {
+        text.focus();
+        if (!document.execCommand("insertText", false, str)) {
+          text.setRangeText(str, text.selectionStart, text.selectionEnd, "end");
+          text.dispatchEvent(new Event("input"));
+        }
+      }
+      function selectRange(a: number, b: number) {
+        const back = document.activeElement as HTMLElement;
+        text.focus();
+        text.setSelectionRange(a, b);
+        if (back !== text && findbar.contains(back)) back.focus();
+        updateStatus();
+      }
+      function showFind(replace: boolean) {
+        findbar.hidden = false;
+        findbar.classList.toggle("with-replace", replace);
+        const sel = text.value.slice(text.selectionStart, text.selectionEnd);
+        if (sel && !sel.includes("\n")) findInput.value = sel;
+        findInput.focus();
+        findInput.select();
+      }
+      function find(forward = true) {
+        const q = findInput.value.toLowerCase();
+        if (!q) return showFind(false);
+        const v = text.value.toLowerCase();
+        let i = forward ? v.indexOf(q, text.selectionEnd) : v.lastIndexOf(q, text.selectionStart - 1);
+        if (i < 0) i = forward ? v.indexOf(q) : v.lastIndexOf(q);
+        if (i >= 0) selectRange(i, i + q.length);
+      }
+      function replaceOne() {
+        const q = findInput.value.toLowerCase();
+        if (q && text.value.slice(text.selectionStart, text.selectionEnd).toLowerCase() === q) insert(replaceInput.value);
+        find(true);
+      }
+      function replaceAll() {
+        const q = findInput.value;
+        if (!q) return;
+        const out = text.value.replace(new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), () => replaceInput.value);
+        if (out === text.value) return;
+        text.focus();
+        text.select();
+        insert(out);
+      }
+      function goTo() {
+        const n = parseInt(prompt(`Go to line (1–${text.value.split("\n").length})`) ?? "");
+        if (!(n > 0)) return;
+        const at = text.value.split("\n").slice(0, n - 1).reduce((sum, l) => sum + l.length + 1, 0);
+        text.blur();
+        selectRange(Math.min(at, text.value.length), Math.min(at, text.value.length));
+      }
+      async function paste() {
+        try { insert(await navigator.clipboard.readText()); } catch { alert(`Use ${mod("V")} to paste.`); }
+      }
+
+      // ---- View ----
+      function zoomBy(step: number) { s.zoom = step ? Math.min(500, Math.max(10, s.zoom + step)) : 100; persist(); render(); }
+      function toggle(key: "wrap" | "status") { s[key] = !s[key]; persist(); render(); }
+      function togglePreview() { cur().preview = !cur().preview; persist(); render(); }
+
+      // ---- Menu bar ----
+      type Item = "-" | { label: string; keys?: string; run: () => void; checked?: boolean };
+      const menus: [string, () => Item[]][] = [
+        ["File", () => [
+          { label: "New Tab", keys: "Alt+N", run: () => addTab() },
+          { label: "Open…", keys: mod("O"), run: () => fileInput.click() },
+          { label: "Save", keys: mod("S"), run: save },
+          { label: "Save As…", keys: isMac ? "⇧⌘S" : "Ctrl+Shift+S", run: saveAs },
+          { label: "Print / PDF…", keys: mod("P"), run: () => print() },
+          "-",
+          { label: "Close Tab", keys: "Alt+W", run: () => closeTab() },
+        ]],
+        ["Edit", () => [
+          { label: "Undo", keys: mod("Z"), run: () => { text.focus(); document.execCommand("undo"); } },
+          { label: "Redo", keys: isMac ? "⇧⌘Z" : "Ctrl+Y", run: () => { text.focus(); document.execCommand("redo"); } },
+          "-",
+          { label: "Cut", keys: mod("X"), run: () => { text.focus(); document.execCommand("cut"); } },
+          { label: "Copy", keys: mod("C"), run: () => { text.focus(); document.execCommand("copy"); } },
+          { label: "Paste", keys: mod("V"), run: paste },
+          { label: "Delete", run: () => { text.focus(); document.execCommand("delete"); } },
+          "-",
+          { label: "Find…", keys: mod("F"), run: () => showFind(false) },
+          { label: "Find Next", keys: "F3", run: () => find(true) },
+          { label: "Find Previous", keys: "Shift+F3", run: () => find(false) },
+          { label: "Replace…", keys: isMac ? "⌥⌘F" : "Ctrl+H", run: () => showFind(true) },
+          { label: "Go To…", keys: mod("G"), run: goTo },
+          "-",
+          { label: "Select All", keys: mod("A"), run: () => { text.focus(); text.select(); } },
+          { label: "Time/Date", keys: "F5", run: () => insert(new Date().toLocaleString()) },
+        ]],
+        ["Format", () => [
+          { label: "Word Wrap", run: () => toggle("wrap"), checked: s.wrap },
+        ]],
+        ["View", () => [
+          { label: "Zoom In", keys: mod("="), run: () => zoomBy(10) },
+          { label: "Zoom Out", keys: mod("-"), run: () => zoomBy(-10) },
+          { label: "Restore Default Zoom", keys: mod("0"), run: () => zoomBy(0) },
+          { label: "Status Bar", run: () => toggle("status"), checked: s.status },
+          ...(isMd(cur()) ? [{ label: "Markdown Preview", run: togglePreview, checked: !!cur().preview }] : []),
+          "-",
+          { label: "Next Tab", keys: "Alt+]", run: () => cycle(1) },
+          { label: "Previous Tab", keys: "Alt+[", run: () => cycle(-1) },
+        ]],
+        ["Help", () => [
+          { label: "About Notey", run: () => open("/", "_blank") },
+          { label: "Download for Mac", run: () => open("https://github.com/kronzhq/notey/releases/latest", "_blank") },
+        ]],
+      ];
+
+      const menuButtons = menus.map(([name], i) => {
+        const b = document.createElement("button");
+        b.className = "menu-button";
+        b.textContent = name;
+        b.onclick = () => (openMenu === i ? closeMenu() : showMenu(i));
+        b.onmouseenter = () => { if (openMenu !== null && openMenu !== i) showMenu(i); };
+        return b;
+      });
+      $("menus").replaceChildren(...menuButtons);
+      // Clicking a menu must not take focus (or the selection) from the text.
+      $("menubar").addEventListener("mousedown", (e: MouseEvent) => e.preventDefault());
+
+      let openMenu: number | null = null;
+      let popup: HTMLElement | null = null;
+      function showMenu(i: number) {
+        closeMenu();
+        openMenu = i;
+        menuButtons[i].classList.add("open");
+        popup = document.createElement("div");
+        popup.className = "popup";
+        popup.setAttribute("role", "menu");
+        for (const item of menus[i][1]()) {
+          if (item === "-") { popup.append(Object.assign(document.createElement("hr"))); continue; }
+          const row = document.createElement("button");
+          row.setAttribute("role", "menuitem");
+          row.innerHTML = `<span class="check">${item.checked ? "✓" : ""}</span><span class="label"></span><kbd>${item.keys ?? ""}</kbd>`;
+          row.querySelector(".label")!.textContent = item.label;
+          row.onclick = () => { closeMenu(); item.run(); };
+          popup.append(row);
+        }
+        const r = menuButtons[i].getBoundingClientRect();
+        popup.style.top = `${r.bottom + 4}px`;
+        popup.style.left = `${Math.max(4, Math.min(r.left, innerWidth - 260))}px`;
+        $("menubar").append(popup);
+      }
+      function closeMenu() {
+        popup?.remove();
+        popup = null;
+        if (openMenu !== null) menuButtons[openMenu].classList.remove("open");
+        openMenu = null;
+      }
+      addEventListener("mousedown", (e) => { if (popup && !$("menubar").contains(e.target)) closeMenu(); });
+
+      // ---- Wiring ----
+      text.oninput = () => {
+        const t = cur();
+        t.text = text.value;
+        if (!t.dirty) { t.dirty = true; renderTabs(); }
+        persist();
+        renderPreview();
+        updateStatus();
+      };
+      text.onkeyup = text.onclick = text.onselect = updateStatus;
+      document.addEventListener("selectionchange", updateStatus);
+      text.onkeydown = (e) => { if (e.key === "Tab" && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) { e.preventDefault(); insert("\t"); } };
+      $("preview-toggle").onclick = togglePreview;
+      fileInput.onchange = () => { openFiles(fileInput.files!); fileInput.value = ""; };
+
+      findInput.onkeydown = (e: KeyboardEvent) => { if (e.key === "Enter") { e.preventDefault(); find(!e.shiftKey); } };
+      replaceInput.onkeydown = (e: KeyboardEvent) => { if (e.key === "Enter") { e.preventDefault(); replaceOne(); } };
+      $("find-next").onclick = () => find(true);
+      $("find-prev").onclick = () => find(false);
+      $("replace-one").onclick = replaceOne;
+      $("replace-all").onclick = replaceAll;
+      $("find-close").onclick = () => { findbar.hidden = true; text.focus(); };
+
+      // Browsers keep Cmd+T/W/N and Ctrl+Tab for themselves, so tabs use Alt instead.
+      addEventListener("keydown", (e) => {
+        const cmd = isMac ? e.metaKey : e.ctrlKey;
+        const k = e.key.toLowerCase();
+        const run = (f: () => void) => { e.preventDefault(); closeMenu(); f(); };
+        if (e.key === "Escape") { if (popup) closeMenu(); else if (!findbar.hidden) { findbar.hidden = true; text.focus(); } }
+        else if (cmd && e.altKey && e.code === "KeyF") run(() => showFind(true));
+        else if (cmd && e.shiftKey && k === "s") run(saveAs);
+        else if (cmd && k === "s") run(save);
+        else if (cmd && k === "o") run(() => fileInput.click());
+        else if (cmd && k === "f") run(() => showFind(false));
+        else if (!isMac && e.ctrlKey && k === "h") run(() => showFind(true));
+        else if (cmd && k === "g") run(goTo);
+        else if (cmd && (k === "=" || k === "+")) run(() => zoomBy(10));
+        else if (cmd && k === "-") run(() => zoomBy(-10));
+        else if (cmd && k === "0") run(() => zoomBy(0));
+        else if (e.altKey && e.code === "KeyN") run(() => addTab());
+        else if (e.altKey && e.code === "KeyW") run(() => closeTab());
+        else if (e.altKey && e.code === "BracketRight") run(() => cycle(1));
+        else if (e.altKey && e.code === "BracketLeft") run(() => cycle(-1));
+        else if (e.key === "F3") run(() => find(!e.shiftKey));
+        else if (e.key === "F5") run(() => insert(new Date().toLocaleString()));
+      });
+
+      addEventListener("dragover", (e) => e.preventDefault());
+      addEventListener("drop", (e) => { e.preventDefault(); if (e.dataTransfer?.files.length) openFiles(e.dataTransfer.files); });
+      // Another browser tab of this page saved: pick up its state.
+      addEventListener("storage", (e) => { if (e.key === KEY && e.newValue) { Object.assign(s, JSON.parse(e.newValue)); render(); } });
+      addEventListener("beforeprint", () => {
+        const t = cur();
+        $("print").innerHTML = isMd(t) ? marked.parse(t.text) as string : `<pre>${escape(t.text)}</pre>`;
+      });
+
+      render();
+      text.focus();
+    </script>
+
+    <style is:global>
+      /* The app's default light and dark themes (default_theme in app/src/main.rs). */
+      :root {
+        --bg: #ffffff;
+        --fg: #1f2328;
+        --border: #e4e4e7;
+        --input: #d4d4d8;
+        --muted: #6b7280;
+        --secondary: #f4f4f5;
+        --hover: #e4e4e7;
+        --accent: #e8eefc;
+        --accent-fg: #1e3a8a;
+        --popover: #ffffff;
+        --selection: #2563eb40;
+        --caret: #2563eb;
+        --tab-fg: #71717a;
+        --tab-active-fg: #18181b;
+        color-scheme: light;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #1e1f22;
+          --fg: #e4e4e7;
+          --border: #2e3035;
+          --input: #3a3d44;
+          --muted: #9ca3af;
+          --secondary: #18191c;
+          --hover: #2a2b30;
+          --accent: #3867d6;
+          --accent-fg: #ffffff;
+          --popover: #25262a;
+          --selection: #4c8dff4d;
+          --caret: #4c8dff;
+          --tab-fg: #8b8f98;
+          --tab-active-fg: #f4f4f5;
+          color-scheme: dark;
+        }
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; }
+      body {
+        --font: 15px;
+        margin: 0;
+        display: flex;
+        flex-direction: column;
+        height: 100dvh;
+        overflow: hidden;
+        font: 14px/1.4 Lilex, ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-variant-ligatures: none;
+        color: var(--fg);
+        background: var(--bg);
+        -webkit-font-smoothing: antialiased;
+      }
+      [hidden] { display: none !important; }
+      button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: default; }
+      ::selection { background: var(--selection); }
+      * { scrollbar-width: thin; scrollbar-color: var(--input) transparent; }
+
+      .icon {
+        display: grid;
+        place-items: center;
+        width: 24px;
+        height: 24px;
+        border-radius: 6px;
+        color: var(--muted);
+      }
+      .icon:hover { background: var(--hover); color: var(--fg); }
+
+      /* ---- Tab bar ---- */
+      #tabs {
+        flex: none;
+        display: flex;
+        height: 36px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-width: none;
+        background: var(--secondary);
+      }
+      .tab {
+        flex: none;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        max-width: 220px;
+        padding: 0 6px 0 12px;
+        color: var(--tab-fg);
+        border-right: 1px solid var(--border);
+        border-bottom: 1px solid var(--border);
+        user-select: none;
+      }
+      .tab:hover { color: var(--tab-active-fg); }
+      .tab .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 8px; }
+      .tab.active { background: var(--bg); color: var(--tab-active-fg); border-bottom-color: transparent; }
+      .tab-end { flex: 1; display: flex; align-items: center; padding: 0 6px; border-bottom: 1px solid var(--border); }
+
+      /* ---- Menu bar ---- */
+      #menubar {
+        flex: none;
+        display: flex;
+        align-items: center;
+        height: 38px;
+        padding: 0 8px;
+        background: var(--secondary);
+        border-bottom: 1px solid var(--border);
+        user-select: none;
+      }
+      #menus { flex: 1; display: flex; gap: 4px; }
+      .menu-button { height: 26px; padding: 0 10px; border-radius: 6px; }
+      .menu-button:hover, .menu-button.open { background: var(--hover); }
+      .popup {
+        position: fixed;
+        z-index: 10;
+        min-width: 220px;
+        max-height: calc(100dvh - 90px);
+        overflow-y: auto;
+        padding: 4px;
+        background: var(--popover);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        box-shadow: 0 8px 24px rgb(0 0 0 / 0.18);
+      }
+      .popup button {
+        display: flex;
+        align-items: center;
+        width: 100%;
+        height: 28px;
+        padding: 0 10px 0 4px;
+        border-radius: 6px;
+        text-align: left;
+      }
+      .popup button:hover { background: var(--accent); color: var(--accent-fg); }
+      .popup .check { width: 20px; text-align: center; font-size: 12px; }
+      .popup .label { flex: 1; padding-right: 24px; }
+      .popup kbd { font: inherit; font-size: 12px; color: var(--muted); }
+      .popup button:hover kbd { color: inherit; opacity: 0.8; }
+      .popup hr { margin: 4px 6px; border: 0; border-top: 1px solid var(--border); }
+
+      /* ---- Find bar ---- */
+      #findbar {
+        flex: none;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        align-items: center;
+        padding: 6px 8px;
+        background: var(--secondary);
+        border-bottom: 1px solid var(--border);
+      }
+      #findbar input {
+        flex: 1 1 10rem;
+        min-width: 0;
+        max-width: 18rem;
+        height: 26px;
+        padding: 0 8px;
+        font: inherit;
+        font-size: 13px;
+        color: inherit;
+        background: var(--bg);
+        border: 1px solid var(--input);
+        border-radius: 6px;
+        outline: none;
+      }
+      #findbar input:focus { border-color: var(--caret); }
+      #findbar button { height: 26px; min-width: 26px; padding: 0 8px; border-radius: 6px; font-size: 13px; }
+      #findbar button:hover { background: var(--hover); }
+      #findbar:not(.with-replace) #replace, #findbar:not(.with-replace) .r { display: none; }
+
+      /* ---- Editor + preview ---- */
+      main { flex: 1; min-height: 0; display: flex; }
+      textarea, #preview { flex: 1 1 0; min-width: 0; font-size: var(--font); line-height: 1.6; }
+      textarea {
+        margin: 0;
+        padding: 8px 12px;
+        border: 0;
+        outline: 0;
+        resize: none;
+        font-family: inherit;
+        tab-size: 4;
+        color: inherit;
+        background: var(--bg);
+        caret-color: var(--caret);
+      }
+      #preview { overflow-y: auto; padding: 8px 16px; border-left: 1px solid var(--border); overflow-wrap: anywhere; }
+
+      .md > :first-child { margin-top: 0.4em; }
+      .md h1, .md h2, .md h3, .md h4 { line-height: 1.25; margin: 1em 0 0.5em; }
+      .md h1 { font-size: 2em; }
+      .md h2 { font-size: 1.5em; }
+      .md h3 { font-size: 1.2em; }
+      .md p, .md ul, .md ol, .md pre, .md table, .md blockquote { margin: 0 0 0.9em; }
+      .md ul, .md ol { padding-left: 1.4em; }
+      .md a { color: var(--caret); }
+      .md code { padding: 0.1em 0.3em; border-radius: 4px; background: var(--secondary); font-size: 0.9em; }
+      .md pre { padding: 10px 12px; border-radius: 6px; background: var(--secondary); overflow-x: auto; }
+      .md pre code { padding: 0; background: none; }
+      .md blockquote { padding-left: 1em; border-left: 3px solid var(--border); color: var(--muted); }
+      .md table { border-collapse: collapse; display: block; overflow-x: auto; }
+      .md th, .md td { padding: 4px 10px; border: 1px solid var(--border); text-align: left; }
+      .md th { font-weight: 600; }
+      .md img { max-width: 100%; }
+      .md hr { border: 0; border-top: 1px solid var(--border); }
+
+      /* ---- Status bar ---- */
+      #status {
+        flex: none;
+        display: flex;
+        align-items: center;
+        height: 28px;
+        font-size: 12px;
+        color: var(--muted);
+        background: var(--secondary);
+        border-top: 1px solid var(--border);
+        white-space: nowrap;
+      }
+      #status span { padding: 0 12px; border-left: 1px solid var(--border); }
+      #status #pos { flex: 1; border-left: 0; }
+
+      /* Phones: preview stacks under the editor, status bar keeps only what fits. */
+      @media (max-width: 640px) {
+        main { flex-direction: column; }
+        #preview { border-left: 0; border-top: 1px solid var(--border); }
+        .menu-button { padding: 0 7px; }
+        textarea { font-size: max(16px, var(--font)); } /* under 16px iOS zooms on focus */
+        #status span:last-child { display: none; }
+      }
+
+      #print { display: none; }
+      @media print {
+        body { display: block; height: auto; overflow: visible; background: #fff; color: #000; }
+        body > :not(#print) { display: none !important; }
+        #print { display: block; }
+        #print pre { white-space: pre-wrap; font: inherit; }
+      }
+    </style>
+  </body>
+</html>
