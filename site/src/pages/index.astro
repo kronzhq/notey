@@ -1,15 +1,18 @@
 ---
 const repo = "https://github.com/kronzhq/notey";
-// BASE_URL is "/betternotepad" (see astro.config.mjs); normalise the trailing slash.
+// BASE_URL is "/" at the custom domain; normalise the trailing slash.
 const base = import.meta.env.BASE_URL.replace(/\/$/, "");
 
 // Shortcuts mirror the app's key bindings in app/src/main.rs.
 const features = [
-  ["⌘T", "Tabs", "Keep many files open in one window and flip between them with ⌃Tab."],
-  ["⌘H", "Find & replace", "Search and replace across the file, step through with F3."],
-  ["⌘G", "Go to line", "Jump straight to any line. Line and column always in the status bar."],
-  [".md", "Markdown preview", "Open a Markdown file and see it rendered live, side by side."],
-  ["⌘+", "Zoom", "Make text bigger or smaller, and ⌘0 to reset."],
+  ["Cmd+T", "Tabs", "Keep many files open in one window and flip between them with Ctrl+Tab."],
+  ["Cmd+H", "Find & replace", "Search and replace across the file, step through with F3."],
+  ["Cmd+G", "Go to line", "Jump straight to any line. Line and column always in the status bar."],
+  [".md", "Markdown preview", "See Markdown rendered live, side by side. Type / for headings, lists and more."],
+  ["PDF", "Export", "Save any tab as PDF or DOCX. Markdown comes out the way the preview shows it."],
+  ["Cmd+Q", "Session restore", "Quit any time. Tabs, windows and unsaved text are back when you reopen."],
+  ["Cmd+,", "Themes", "Light, dark or follow the system. 14 built-in themes, or drop in your own."],
+  ["Cmd+=", "Zoom", "Make text bigger or smaller, and Cmd+0 to reset."],
   ["UTF", "Respects your files", "Keeps encodings and line endings exactly as they were."],
 ];
 ---
@@ -33,11 +36,11 @@ const features = [
   <body>
     <nav>
       <a class="logo" href={`${base}/`}><img src={`${base}/notepad.png`} alt="" width="28" height="28" />notey</a>
-      <a class="nav-link" href={repo}>GitHub ↗</a>
+      <a class="nav-link" href={repo}>GitHub</a>
     </nav>
 
     <header class="hero">
-      <p class="pill">macOS · free &amp; open source</p>
+      <p class="pill">Free and open source for macOS</p>
       <h1>Just text.<br />Nothing in the way<span class="caret"></span></h1>
       <p class="tagline">Notey is a simple, fast plain-text editor for macOS. Opens instantly, stays out of your way.</p>
       <div class="actions">
@@ -69,7 +72,7 @@ const features = [
     </section>
 
     <footer>
-      <span>© Notey</span>
+      <span>Copyright 2026 <a href="https://kronz.xyz">Kronz</a>. Formerly Better Notepad.</span>
       <span><a href={repo}>GitHub</a></span>
     </footer>
 
