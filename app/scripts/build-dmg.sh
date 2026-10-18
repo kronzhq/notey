@@ -21,6 +21,7 @@ codesign --verify --deep --strict "$APP"
 # Drag-to-install window: layout and background live in scripts/dmg-settings.py.
 DMG="$BUNDLE_DIR/dmg/$APP_NAME.dmg"
 rm -f "$DMG"
+mkdir -p "$(dirname "$DMG")"
 uvx dmgbuild -s scripts/dmg-settings.py -D app="$APP" "$APP_NAME" "$DMG"
 
 echo "Signed app:  $APP"
