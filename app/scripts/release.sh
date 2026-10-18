@@ -6,7 +6,7 @@ set -eu
 
 : "${SIGN_IDENTITY:?set SIGN_IDENTITY, e.g. \"Developer ID Application: Your Name (TEAMID)\"}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-betternotepad-notary}"
-APP_NAME="Better Notepad"
+APP_NAME="Notey"
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT/app"
@@ -48,9 +48,9 @@ MIN_SYS="$(sed -n 's/^minimum_system_version = "\(.*\)"/\1/p' Cargo.toml | head 
 NOTES="release-notes/$VERSION.md"
 [ -f "$NOTES" ] || NOTES=/dev/null
 gh release create "v$VERSION" "$DMG" \
-  --title "v$VERSION" --notes-file "$NOTES" --repo sachithrrra/betternotepad
+  --title "v$VERSION" --notes-file "$NOTES" --repo kronzhq/notey
 # GitHub renames the asset (spaces -> dots), so ask it for the real URL
-DMG_URL="$(gh release view "v$VERSION" --repo sachithrrra/betternotepad \
+DMG_URL="$(gh release view "v$VERSION" --repo kronzhq/notey \
   --json assets -q '.assets[] | select(.name | endswith(".dmg")) | .url')"
 
 # 11. Add the appcast entry (newest first) — does not commit or push

@@ -1,4 +1,4 @@
-# Better Notepad
+# Notey
 
 Markdown files get a live preview beside the editor. The eye button in
 the top-right corner hides or shows it.
@@ -20,5 +20,5 @@ the top-right corner hides or shows it.
 
 ## Updates
 
-Better Notepad checks for updates once a day. You can also use
-**Better Notepad > Check for Updates…** any time.
+Notey checks for updates once a day. You can also use
+**Notey > Check for Updates…** any time.

@@ -6,7 +6,7 @@
 set -eu
 
 : "${SIGN_IDENTITY:?set SIGN_IDENTITY, e.g. \"Developer ID Application: Your Name (TEAMID)\"}"
-APP_NAME="Better Notepad"
+APP_NAME="Notey"
 
 cd "$(dirname "$0")/.."
 cargo bundle --release --format osx

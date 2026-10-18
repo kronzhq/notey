@@ -1,0 +1,12 @@
+// Static hosting for notey.kronz.xyz on Cloudflare Workers. Deploy: cd site && npx wrangler deploy
+// betternotepad.sach.cc is the old name: copies installed before the rename poll its appcast.xml.
+{
+  "name": "notey-site",
+  "compatibility_date": "2026-10-01",
+  "build": { "command": "npm install && npm run build" },
+  "assets": { "directory": "dist" },
+  "routes": [
+    { "pattern": "notey.kronz.xyz", "custom_domain": true },
+    { "pattern": "betternotepad.sach.cc", "custom_domain": true }
+  ]
+}

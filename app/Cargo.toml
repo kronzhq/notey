@@ -1,18 +1,18 @@
 [package]
-name = "betternotepad"
+name = "notey"
 version = "1.3.1"
 edition = "2024"
 description = "A simple, fast plain-text editor for macOS."
 
 [package.metadata.bundle]
-name = "Better Notepad"
-identifier = "xyz.kronz.betternotepad"
+name = "Notey"
+identifier = "xyz.kronz.notey"
 category = "public.app-category.productivity"
 short_description = "A simple, fast plain-text editor for macOS."
 icon = ["icons/AppIcon.icns"]
 [package.metadata.bundle.osx]
 minimum_system_version = "11.0"
-# Registers Better Notepad in Finder's "Open With" menu for any file (see main.rs on_open_urls),
+# Registers Notey in Finder's "Open With" menu for any file (see main.rs on_open_urls),
 # and Sparkle's feed/key (see src/updater.rs).
 info_plist_exts = ["Info-document-types.plist", "Info-sparkle.plist"]
 # `cargo bundle` fails if this is missing, so run scripts/fetch-sparkle.sh first

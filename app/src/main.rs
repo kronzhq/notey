@@ -195,7 +195,7 @@ fn support_dir() -> Option<PathBuf> {
     if cfg!(test) {
         return None;
     }
-    Some(std::env::home_dir()?.join("Library/Application Support/Better Notepad"))
+    Some(std::env::home_dir()?.join("Library/Application Support/Notey"))
 }
 
 fn recent_file() -> Option<PathBuf> {
@@ -234,6 +234,10 @@ fn save_settings(cx: &mut App) {
 /// On first launch (no support dir yet), writes the welcome notes there and
 /// returns their paths to open; empty on every later launch.
 fn first_run_welcome() -> Vec<PathBuf> {
+    // The app was called Better Notepad; carry its settings, themes and session over.
+    if let Some(dir) = support_dir().filter(|d| !d.exists()) {
+        let _ = std::fs::rename(dir.with_file_name("Better Notepad"), &dir);
+    }
     let Some(dir) = support_dir().filter(|d| !d.exists()) else {
         return Vec::new();
     };
@@ -643,7 +647,7 @@ impl Notepad {
     fn update_title(&self, window: &mut Window) {
         let doc = self.doc();
         let star = if doc.dirty { "*" } else { "" };
-        window.set_window_title(&format!("{star}{} - Better Notepad", doc.name()));
+        window.set_window_title(&format!("{star}{} - Notey", doc.name()));
         window.set_window_edited(self.docs.iter().any(|doc| doc.dirty));
     }
 
@@ -1524,13 +1528,13 @@ fn menus(settings: &Settings, native: bool) -> Vec<Menu> {
     let mut menus = Vec::new();
     let app_menu = native && cfg!(target_os = "macos");
     if app_menu {
-        menus.push(Menu::new("Better Notepad").items([
-            MenuItem::action("About Better Notepad", About),
+        menus.push(Menu::new("Notey").items([
+            MenuItem::action("About Notey", About),
             MenuItem::action("Check for Updates…", CheckForUpdates),
             MenuItem::separator(),
             MenuItem::action("Settings…", OpenSettings),
             MenuItem::separator(),
-            MenuItem::action("Quit Better Notepad", Quit),
+            MenuItem::action("Quit Notey", Quit),
         ]));
     }
     menus.extend([
@@ -1613,7 +1617,7 @@ fn menus(settings: &Settings, native: bool) -> Vec<Menu> {
             MenuItem::action("Previous Tab", PreviousTab),
         ]),
         Menu::new("Help").items([
-            MenuItem::action("About Better Notepad", About),
+            MenuItem::action("About Notey", About),
             MenuItem::action("Check for Updates…", CheckForUpdates),
         ]),
     ]);
@@ -1965,7 +1969,7 @@ fn build_window(paths: Vec<PathBuf>, restore: Option<WindowState>, cx: &mut App)
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(TitlebarOptions {
-            title: Some("Better Notepad".into()),
+            title: Some("Notey".into()),
             ..Default::default()
         }),
         ..Default::default()
@@ -2052,7 +2056,7 @@ fn open_themes(cx: &mut App) {
 
 fn open_about(cx: &mut App) {
     open_single(
-        "About Better Notepad",
+        "About Notey",
         size(px(320.), px(240.)),
         false,
         |_, _| AboutView,
@@ -2077,7 +2081,7 @@ impl Render for AboutView {
                 div()
                     .text_2xl()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("Better Notepad"),
+                    .child("Notey"),
             )
             .child(
                 div()
@@ -2416,7 +2420,7 @@ impl Render for SettingsView {
                     .pt_2()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child(concat!("Better Notepad ", env!("CARGO_PKG_VERSION"))),
+                    .child(concat!("Notey ", env!("CARGO_PKG_VERSION"))),
             )
     }
 }

@@ -7,9 +7,9 @@
      xmlns:dc="http://purl.org/dc/elements/1.1/"
      version="2.0">
   <channel>
-    <title>Better Notepad Changelog</title>
-    <link>https://betternotepad.sach.cc/appcast.xml</link>
-    <description>Updates to Better Notepad.</description>
+    <title>Notey Changelog</title>
+    <link>https://notey.kronz.xyz/appcast.xml</link>
+    <description>Updates to Notey.</description>
     <language>en</language>
     <item>
       <title>Version 1.3.1</title>

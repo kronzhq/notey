@@ -445,7 +445,7 @@ fn write_pdf(
     body: f32,
     path: &Path,
 ) -> Result<()> {
-    let mut doc = PdfDocument::new("Better Notepad Export");
+    let mut doc = PdfDocument::new("Notey Export");
     let m = Fonts::load(&mut doc, family, code_family)?;
     let margin = Mm(MARGIN_MM).into_pt().0;
     let page_w = Mm(PAGE_W_MM).into_pt().0;
@@ -688,12 +688,12 @@ mod tests {
         ] {
             let write =
                 |format: ExportFormat, path| format.write(&text, markdown, family, 12.0, path);
-            let pdf_path = dir.join("betternotepad_export_test.pdf");
+            let pdf_path = dir.join("notey_export_test.pdf");
             write(ExportFormat::Pdf, &pdf_path).unwrap();
             assert!(std::fs::read(&pdf_path).unwrap().starts_with(b"%PDF"));
             std::fs::remove_file(&pdf_path).unwrap();
 
-            let docx_path = dir.join("betternotepad_export_test.docx");
+            let docx_path = dir.join("notey_export_test.docx");
             write(ExportFormat::Docx, &docx_path).unwrap();
             assert!(std::fs::read(&docx_path).unwrap().starts_with(b"PK")); // docx is a zip archive
             std::fs::remove_file(&docx_path).unwrap();
