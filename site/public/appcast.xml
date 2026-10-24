@@ -12,6 +12,17 @@
     <description>Updates to Notey.</description>
     <language>en</language>
     <item>
+      <title>Version 1.5.0</title>
+      <pubDate>Sat, 24 Oct 2026 06:49:19 +0000</pubDate>
+      <sparkle:version>20261024.064823</sparkle:version>
+      <sparkle:shortVersionString>1.5.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>11.0</sparkle:minimumSystemVersion>
+      <enclosure
+        url="https://github.com/kronzhq/notey/releases/download/v1.5.0/Notey.dmg"
+        sparkle:edSignature="fTPpAkRsULQ72kZllGggquuVH2JU6EtAEgp6G1LlpmtJ6ukRZxu9kIy5mrogoV1oQgi/wZLLYS/fekCJhFmyBg==" length="10618557"
+        type="application/octet-stream" />
+    </item>
+    <item>
       <title>Version 1.4.0</title>
       <pubDate>Sun, 18 Oct 2026 10:24:16 +0000</pubDate>
       <sparkle:version>20261018.102320</sparkle:version>
