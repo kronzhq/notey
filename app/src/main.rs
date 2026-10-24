@@ -11,8 +11,8 @@ use anyhow::{Result, bail};
 use encoding::{Encoding, Eol, decode, encode};
 use export::ExportFormat;
 use gpui_kit::component::{
-    ActiveTheme as _, IconName, IndexPath, Root, Selectable as _, Sizable as _, Theme, ThemeConfig,
-    ThemeMode, ThemeRegistry, ThemeSet, WindowExt as _,
+    ActiveTheme as _, Icon, IconName, IndexPath, Root, Selectable as _, Sizable as _, Theme,
+    ThemeConfig, ThemeMode, ThemeRegistry, ThemeSet, WindowExt as _,
     button::{Button, ButtonGroup, ButtonVariants as _},
     dialog::{DialogAction, DialogClose, DialogFooter},
     h_flex,
@@ -1745,54 +1745,57 @@ fn default_theme(mode: ThemeMode, registry: &ThemeRegistry) -> Rc<ThemeConfig> {
     macro_rules! colors {
         ($($field:ident: $hex:literal),* $(,)?) => { $(config.colors.$field = Some($hex.into());)* };
     }
+    // Torrie's Light and Dark.
     if mode.is_dark() {
         colors! {
-            background: "#1e1f22",
-            foreground: "#e4e4e7",
-            border: "#2e3035",
-            input: "#3a3d44",
-            muted_foreground: "#9ca3af",
-            primary: "#4c8dff",
-            primary_hover: "#3b7bf0",
-            primary_foreground: "#ffffff",
-            secondary: "#18191c",
+            background: "#0f1115",
+            foreground: "#e8eaef",
+            border: "#22262e",
+            input: "#30353f",
+            muted_foreground: "#a7adb7",
+            primary: "#8f82ff",
+            primary_hover: "#8f82ff",
+            primary_foreground: "#14161b",
+            secondary: "#17191f",
+            secondary_hover: "#1a1d24",
             // Open menu-bar button (selected ghost); derived from `secondary` it's near-black.
-            secondary_active: "#3a3d44",
-            // Menu/list highlight: a clear blue like macOS, not a muddy navy.
-            accent: "#3867d6",
-            accent_foreground: "#ffffff",
-            popover: "#25262a",
-            selection: "#4c8dff4d",
-            caret: "#4c8dff",
-            ring: "#4c8dff",
-            tab_bar: "#18191c",
-            tab: "#18191c",
-            tab_active: "#1e1f22",
-            tab_foreground: "#8b8f98",
-            tab_active_foreground: "#f4f4f5",
+            secondary_active: "#35335b",
+            accent: "#35335b",
+            accent_foreground: "#e8eaef",
+            popover: "#20232b",
+            selection: "#8f82ff4d",
+            caret: "#8f82ff",
+            ring: "#8f82ff",
+            tab_bar: "#17191f",
+            tab: "#17191f",
+            tab_active: "#0f1115",
+            tab_foreground: "#89919e",
+            tab_active_foreground: "#e8eaef",
         }
     } else {
         colors! {
-            background: "#ffffff",
-            foreground: "#1f2328",
-            border: "#e4e4e7",
-            input: "#d4d4d8",
-            muted_foreground: "#6b7280",
-            primary: "#2563eb",
-            primary_hover: "#1d4ed8",
+            background: "#fcfcfd",
+            foreground: "#14161b",
+            border: "#e6e8ed",
+            input: "#d4d8df",
+            muted_foreground: "#525865",
+            primary: "#5c4dff",
+            primary_hover: "#5c4dff",
             primary_foreground: "#ffffff",
-            secondary: "#f4f4f5",
-            accent: "#e8eefc",
-            accent_foreground: "#1e3a8a",
+            secondary: "#f1f2f5",
+            secondary_hover: "#f3f4f7",
+            secondary_active: "#dcd9fd",
+            accent: "#dcd9fd",
+            accent_foreground: "#14161b",
             popover: "#ffffff",
-            selection: "#2563eb40",
-            caret: "#2563eb",
-            ring: "#2563eb",
-            tab_bar: "#f4f4f5",
-            tab: "#f4f4f5",
-            tab_active: "#ffffff",
-            tab_foreground: "#71717a",
-            tab_active_foreground: "#18181b",
+            selection: "#5c4dff4d",
+            caret: "#5c4dff",
+            ring: "#5c4dff",
+            tab_bar: "#f1f2f5",
+            tab: "#f1f2f5",
+            tab_active: "#fcfcfd",
+            tab_foreground: "#646c7b",
+            tab_active_foreground: "#14161b",
         }
     }
     Rc::new(config)
@@ -2037,19 +2040,9 @@ fn open_single<V: Render>(
 fn open_settings(cx: &mut App) {
     open_single(
         "Settings",
-        size(px(560.), px(580.)),
+        size(px(560.), px(640.)),
         true,
         SettingsView::new,
-        cx,
-    );
-}
-
-fn open_themes(cx: &mut App) {
-    open_single(
-        "Themes",
-        size(px(560.), px(360.)),
-        true,
-        ThemesView::new,
         cx,
     );
 }
@@ -2057,7 +2050,7 @@ fn open_themes(cx: &mut App) {
 fn open_about(cx: &mut App) {
     open_single(
         "About Notey",
-        size(px(320.), px(240.)),
+        size(px(300.), px(360.)),
         false,
         |_, _| AboutView,
         cx,
@@ -2069,86 +2062,93 @@ struct AboutView;
 impl Render for AboutView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let link = div()
+            .id("site")
+            .mt_4()
+            .px_2()
+            .py(px(1.))
+            .rounded_full()
+            .bg(theme.primary.opacity(0.14))
+            .text_color(theme.primary)
+            .text_xs()
+            .font_weight(FontWeight::MEDIUM)
+            .cursor_pointer()
+            .child("notey.kronz.xyz")
+            .on_click(|_, _, cx| cx.open_url("https://notey.kronz.xyz"));
         v_flex()
             .size_full()
             .items_center()
             .justify_center()
-            .gap_1()
-            .p_6()
+            .px_6()
+            .text_center()
+            .text_sm()
             .text_color(theme.foreground)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             .child(
+                img(std::sync::Arc::new(Image::from_bytes(
+                    ImageFormat::Png,
+                    include_bytes!("../../notepad.png").to_vec(),
+                )))
+                .size(px(96.))
+                .rounded(px(22.)),
+            )
+            .child(
                 div()
-                    .text_2xl()
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .mt_3()
+                    .text_size(px(28.))
+                    .font_weight(FontWeight::BOLD)
                     .child("Notey"),
             )
             .child(
                 div()
-                    .text_sm()
                     .text_color(theme.muted_foreground)
                     .child(concat!("Version ", env!("CARGO_PKG_VERSION"))),
             )
             .child(
                 div()
-                    .pt_3()
-                    .text_sm()
-                    .text_center()
-                    .child("A simple, fast plain-text editor for macOS."),
+                    .mt_3()
+                    .text_base()
+                    .child("A simple, fast plain-text")
+                    .child("editor for your Mac."),
+            )
+            .child(link)
+            .child(
+                div()
+                    .mt_4()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("© Kronz"),
             )
     }
 }
 
-type ThemeSelect = Entity<SelectState<SearchableVec<String>>>;
+const SETTINGS_TABS: [&str; 2] = ["General", "Appearance"];
 
 struct SettingsView {
+    /// Index into `SETTINGS_TABS`.
+    tab: usize,
     font_family: Entity<SelectState<SearchableVec<String>>>,
     font_size: Entity<SelectState<Vec<String>>>,
     _subscriptions: Vec<Subscription>,
 }
 
-/// Names of the loaded themes for `mode`, and where the chosen one is among them.
-fn theme_names(mode: ThemeMode, cx: &App) -> (SearchableVec<String>, Option<IndexPath>) {
-    let names = themes_for(mode, cx);
-    let chosen = cx.global::<Settings>().theme(mode);
-    let ix = names.iter().position(|n| n == chosen);
-    (SearchableVec::new(names), ix.map(IndexPath::new))
-}
-
-/// Theme names for `mode`: the default first, then the bundled and file themes by name.
-fn themes_for(mode: ThemeMode, cx: &App) -> Vec<String> {
-    let files = ThemeRegistry::global(cx).themes().values();
-    let mut themes: Vec<_> = files
+/// Themes for `mode`: our default first, then the bundled and file themes by name.
+fn themes_for(mode: ThemeMode, cx: &App) -> Vec<Rc<ThemeConfig>> {
+    let registry = ThemeRegistry::global(cx);
+    let mut themes: Vec<_> = registry
+        .themes()
+        .values()
         .chain(&cx.global::<BuiltinThemes>().0)
         .filter(|t| t.mode == mode)
+        .map(|t| match t.is_default {
+            true => default_theme(mode, registry),
+            false => t.clone(),
+        })
         .collect();
+    // Stable, so a file theme stays ahead of the bundled one it replaces.
     themes.sort_by_key(|t| (!t.is_default, t.name.to_lowercase()));
-    let mut names: Vec<String> = themes.iter().map(|t| t.name.to_string()).collect();
-    names.dedup();
-    names
-}
-
-fn theme_select(
-    mode: ThemeMode,
-    window: &mut Window,
-    cx: &mut Context<ThemesView>,
-) -> (ThemeSelect, Subscription) {
-    let (names, ix) = theme_names(mode, cx);
-    let select = cx.new(|cx| SelectState::new(names, ix, window, cx).searchable(true));
-    let subscription = cx.subscribe(
-        &select,
-        move |_, _, event: &SelectEvent<SearchableVec<String>>, cx| {
-            if let SelectEvent::Confirm(Some(name)) = event {
-                let name = SharedString::from(name.clone());
-                cx.update_global::<Settings, _>(|s, _| match mode {
-                    ThemeMode::Dark => s.dark_theme = name,
-                    ThemeMode::Light => s.light_theme = name,
-                });
-                apply_appearance(cx);
-            }
-        },
-    );
-    (select, subscription)
+    themes.dedup_by(|a, b| a.name == b.name);
+    themes
 }
 
 impl SettingsView {
@@ -2193,8 +2193,11 @@ impl SettingsView {
                 }
             }),
             cx.observe_global::<Settings>(|_, cx| cx.notify()),
+            // Theme files come and go while the window is open.
+            cx.observe_global::<ThemeRegistry>(|_, cx| cx.notify()),
         ];
         Self {
+            tab: 0,
             font_family,
             font_size,
             _subscriptions: subscriptions,
@@ -2202,112 +2205,18 @@ impl SettingsView {
     }
 }
 
-struct ThemesView {
-    light_theme: ThemeSelect,
-    dark_theme: ThemeSelect,
-    _subscriptions: Vec<Subscription>,
-}
-
-impl ThemesView {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (light_theme, light_sub) = theme_select(ThemeMode::Light, window, cx);
-        let (dark_theme, dark_sub) = theme_select(ThemeMode::Dark, window, cx);
-        let subscriptions = vec![
-            light_sub,
-            dark_sub,
-            // Theme files come and go while the window is open.
-            cx.observe_global_in::<ThemeRegistry>(window, |this: &mut Self, window, cx| {
-                for (mode, select) in [
-                    (ThemeMode::Light, this.light_theme.clone()),
-                    (ThemeMode::Dark, this.dark_theme.clone()),
-                ] {
-                    let (names, ix) = theme_names(mode, cx);
-                    select.update(cx, |select, cx| {
-                        select.set_items(names, window, cx);
-                        select.set_selected_index(ix, window, cx);
-                    });
-                }
-            }),
-        ];
-        Self {
-            light_theme,
-            dark_theme,
-            _subscriptions: subscriptions,
-        }
-    }
-}
-
-impl Render for ThemesView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
-            .id("themes")
-            .size_full()
-            .p_5()
-            .gap_2()
-            .text_color(cx.theme().foreground)
-            .on_action(|_: &CloseWindow, window, _| window.remove_window())
-            // Clears the focus ring a Select trigger keeps after Confirm (see SettingsView).
-            .on_click(|_, window, cx| window.blur(cx))
-            .child(
-                div()
-                    .text_xl()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .pb_2()
-                    .child("Themes"),
-            )
-            .child(setting_row(
-                "Light theme",
-                "Colors in light mode",
-                div().w(px(180.)).child(Select::new(&self.light_theme)),
-                cx,
-            ))
-            .child(setting_row(
-                "Dark theme",
-                "Colors in dark mode",
-                div().w(px(180.)).child(Select::new(&self.dark_theme)),
-                cx,
-            ))
-            .child(setting_row(
-                "Custom themes",
-                "JSON theme files here apply as you save them",
-                Button::new("themes-folder")
-                    .outline()
-                    .small()
-                    .label("Open Folder")
-                    .on_click(|_, _, cx| {
-                        let Some(dir) = themes_dir() else { return };
-                        let _ = std::fs::create_dir_all(&dir);
-                        // With no theme of their own yet, start them off with one to edit.
-                        let has_theme = std::fs::read_dir(&dir).into_iter().flatten().any(|e| {
-                            e.is_ok_and(|e| e.path().extension().is_some_and(|x| x == "json"))
-                        });
-                        if !has_theme {
-                            let _ = std::fs::write(dir.join("my-theme.json"), example_theme(cx));
-                        }
-                        cx.open_with_system(&dir);
-                    }),
-                cx,
-            ))
-    }
-}
-
-/// One settings card: title and hint on the left, control on the right.
+/// One settings row: title and hint on the left, control on the right.
 fn setting_row(
     title: &'static str,
     hint: &'static str,
     control: impl IntoElement,
     cx: &App,
-) -> impl IntoElement {
+) -> Div {
     let theme = cx.theme();
     h_flex()
         .gap_4()
-        .px_3()
-        .py_2p5()
-        .overflow_hidden()
-        .rounded(theme.radius)
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.secondary)
+        .px_4()
+        .py_3()
         .child(
             v_flex()
                 .flex_1()
@@ -2325,6 +2234,122 @@ fn setting_row(
         .child(div().flex_none().child(control))
 }
 
+/// A titled group of settings rows in one card, divided by hairlines.
+fn setting_section(title: &'static str, rows: Vec<Div>, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    let n = rows.len();
+    v_flex()
+        .gap_2()
+        .child(
+            div()
+                .pl_1()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.muted_foreground)
+                .child(title),
+        )
+        .child(
+            v_flex()
+                .overflow_hidden()
+                .rounded(theme.radius_lg)
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.secondary)
+                .children(rows.into_iter().enumerate().map(|(i, r)| {
+                    r.when(i + 1 < n, |r| r.border_b_1().border_color(theme.border))
+                })),
+        )
+}
+
+/// A selectable theme: a miniature editor in its colors above its name.
+fn theme_card(theme: &ThemeConfig, on: bool, cx: &App) -> Stateful<Div> {
+    let ui = cx.theme();
+    div()
+        .id(SharedString::from(format!("theme-{}", theme.name)))
+        .w(px(140.))
+        .flex()
+        .flex_col()
+        .gap_1p5()
+        .child(
+            div()
+                .h(px(64.))
+                .p(px(2.))
+                .rounded(ui.radius_lg)
+                .border_2()
+                .border_color(if on { ui.primary } else { ui.border })
+                .child(
+                    div()
+                        .size_full()
+                        .rounded(ui.radius)
+                        .overflow_hidden()
+                        .child(theme_preview(theme, cx)),
+                ),
+        )
+        .child(
+            h_flex()
+                .gap_1()
+                .text_xs()
+                .when(on, |d| {
+                    d.font_weight(FontWeight::MEDIUM)
+                        .child(Icon::new(IconName::Check).xsmall().text_color(ui.primary))
+                })
+                .when(!on, |d| d.text_color(ui.muted_foreground))
+                .child(div().min_w_0().truncate().child(theme.name.clone())),
+        )
+}
+
+/// The theme's own colors (they are the content here): tab strip, text lines, a selection and caret.
+fn theme_preview(theme: &ThemeConfig, cx: &App) -> Div {
+    let base = default_theme(theme.mode, ThemeRegistry::global(cx));
+    // Keys a theme leaves unset fall back to the default palette.
+    let color = |get: fn(&ThemeConfig) -> &Option<SharedString>| -> Hsla {
+        get(theme)
+            .as_ref()
+            .or(get(&base).as_ref())
+            .and_then(|hex| Rgba::try_from(hex.as_ref()).ok())
+            .map_or(transparent_black(), Into::into)
+    };
+    let line = |w: f32, c: Hsla| div().h(px(3.)).w(px(w)).rounded_full().bg(c);
+    let text = color(|t| &t.colors.foreground);
+    let muted = color(|t| &t.colors.muted_foreground);
+    let primary = color(|t| &t.colors.primary);
+    v_flex()
+        .size_full()
+        .bg(color(|t| &t.colors.background))
+        .child(
+            h_flex()
+                .h(px(12.))
+                .px_1()
+                .items_end()
+                .bg(color(|t| &t.colors.tab_bar))
+                .child(
+                    div()
+                        .h(px(9.))
+                        .w(px(36.))
+                        .rounded_t(px(2.))
+                        .bg(color(|t| &t.colors.background)),
+                ),
+        )
+        .child(
+            v_flex()
+                .p_2()
+                .gap_1p5()
+                .child(line(52., text))
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .child(line(18., muted))
+                        .child(line(30., color(|t| &t.colors.selection))),
+                )
+                .child(
+                    h_flex()
+                        .gap(px(1.))
+                        .child(line(40., text))
+                        .child(div().h(px(7.)).w(px(1.5)).bg(primary)),
+                ),
+        )
+}
+
 fn set_toggle(update: fn(&mut Settings, bool)) -> impl Fn(&bool, &mut Window, &mut App) {
     move |on, _, cx| {
         let on = *on;
@@ -2336,16 +2361,136 @@ fn set_toggle(update: fn(&mut Settings, bool)) -> impl Fn(&bool, &mut Window, &m
 impl Render for SettingsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let settings = cx.global::<Settings>().clone();
-        let theme_ix = Appearance::ALL
-            .iter()
-            .position(|&a| a == settings.appearance);
+        let theme = cx.theme().clone();
+
+        let body = match self.tab {
+            0 => vec![
+                setting_section(
+                    "EDITOR",
+                    vec![
+                        setting_row(
+                            "Font",
+                            "Family and size of the text",
+                            h_flex()
+                                .gap_2()
+                                .child(div().w(px(180.)).child(Select::new(&self.font_family)))
+                                .child(div().w(px(76.)).child(Select::new(&self.font_size))),
+                            cx,
+                        ),
+                        setting_row(
+                            "Word wrap",
+                            "Fit text within the window by default",
+                            Switch::new("word-wrap")
+                                .checked(settings.word_wrap)
+                                .on_change(set_toggle(|s, on| s.word_wrap = on)),
+                            cx,
+                        ),
+                        setting_row(
+                            "Status bar",
+                            "Show line, column, zoom and encoding",
+                            Switch::new("status-bar")
+                                .checked(settings.status_bar)
+                                .on_change(set_toggle(|s, on| s.status_bar = on)),
+                            cx,
+                        ),
+                    ],
+                    cx,
+                )
+                .into_any_element(),
+            ],
+            _ => {
+                let theme_ix = Appearance::ALL
+                    .iter()
+                    .position(|&a| a == settings.appearance);
+                // One grid of cards per mode.
+                let cards = |mode: ThemeMode, cx: &App| {
+                    let chosen = settings.theme(mode).clone();
+                    div().p_4().flex().flex_wrap().gap_3().children(
+                        themes_for(mode, cx).into_iter().map(|t| {
+                            let name = t.name.clone();
+                            theme_card(&t, name == chosen, cx).on_click(move |_, _, cx| {
+                                let name = name.clone();
+                                cx.update_global::<Settings, _>(|s, _| match mode {
+                                    ThemeMode::Dark => s.dark_theme = name,
+                                    ThemeMode::Light => s.light_theme = name,
+                                });
+                                apply_appearance(cx);
+                            })
+                        }),
+                    )
+                };
+                vec![
+                    setting_section(
+                        "APPEARANCE",
+                        vec![
+                            setting_row(
+                                "App theme",
+                                "Light or dark mode; System follows macOS",
+                                ButtonGroup::new("appearance")
+                                    .outline()
+                                    .small()
+                                    .children(Appearance::ALL.iter().enumerate().map(|(ix, a)| {
+                                        Button::new(ix)
+                                            .label(a.label())
+                                            .selected(theme_ix == Some(ix))
+                                    }))
+                                    .on_click(|clicked, _, cx| {
+                                        let Some(&ix) = clicked.first() else { return };
+                                        let appearance = Appearance::ALL[ix];
+                                        cx.update_global::<Settings, _>(|s, _| {
+                                            s.appearance = appearance
+                                        });
+                                        apply_appearance(cx);
+                                    }),
+                                cx,
+                            ),
+                            setting_row(
+                                "Custom themes",
+                                "JSON theme files here apply as you save them",
+                                Button::new("themes-folder")
+                                    .outline()
+                                    .small()
+                                    .label("Open Folder")
+                                    .on_click(|_, _, cx| {
+                                        let Some(dir) = themes_dir() else { return };
+                                        let _ = std::fs::create_dir_all(&dir);
+                                        // With no theme of their own yet, start them off with one to edit.
+                                        let has_theme = std::fs::read_dir(&dir)
+                                            .into_iter()
+                                            .flatten()
+                                            .any(|e| {
+                                                e.is_ok_and(|e| {
+                                                    e.path()
+                                                        .extension()
+                                                        .is_some_and(|x| x == "json")
+                                                })
+                                            });
+                                        if !has_theme {
+                                            let _ = std::fs::write(
+                                                dir.join("my-theme.json"),
+                                                example_theme(cx),
+                                            );
+                                        }
+                                        cx.open_with_system(&dir);
+                                    }),
+                                cx,
+                            ),
+                        ],
+                        cx,
+                    )
+                    .into_any_element(),
+                    setting_section("LIGHT THEME", vec![cards(ThemeMode::Light, cx)], cx)
+                        .into_any_element(),
+                    setting_section("DARK THEME", vec![cards(ThemeMode::Dark, cx)], cx)
+                        .into_any_element(),
+                ]
+            }
+        };
 
         v_flex()
             .id("settings")
             .size_full()
-            .p_5()
-            .gap_2()
-            .text_color(cx.theme().foreground)
+            .text_color(theme.foreground)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             // Controls stop propagation on their own clicks, so this only fires for
             // clicks on the window's blank space, clearing the focus ring a Select
@@ -2353,74 +2498,59 @@ impl Render for SettingsView {
             .on_click(|_, window, cx| window.blur(cx))
             .child(
                 div()
-                    .text_xl()
+                    .px_6()
+                    .pt_5()
+                    .pb_4()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .pb_2()
                     .child("Settings"),
             )
-            .child(setting_row(
-                "App theme",
-                "Select which app theme to display",
-                ButtonGroup::new("appearance")
-                    .outline()
-                    .small()
-                    .children(Appearance::ALL.iter().enumerate().map(|(ix, a)| {
-                        Button::new(ix)
-                            .label(a.label())
-                            .selected(theme_ix == Some(ix))
-                    }))
-                    .on_click(|clicked, _, cx| {
-                        let Some(&ix) = clicked.first() else { return };
-                        let appearance = Appearance::ALL[ix];
-                        cx.update_global::<Settings, _>(|s, _| s.appearance = appearance);
-                        apply_appearance(cx);
-                    }),
-                cx,
-            ))
-            .child(setting_row(
-                "Themes",
-                "Colors for light and dark mode",
-                Button::new("themes")
-                    .outline()
-                    .small()
-                    .label("Customize…")
-                    .on_click(|_, _, cx| open_themes(cx)),
-                cx,
-            ))
-            .child(setting_row(
-                "Font",
-                "Family and size of the text",
-                h_flex()
-                    .gap_2()
-                    .child(div().w(px(180.)).child(Select::new(&self.font_family)))
-                    .child(div().w(px(76.)).child(Select::new(&self.font_size))),
-                cx,
-            ))
-            .child(setting_row(
-                "Word wrap",
-                "Fit text within the window by default",
-                Switch::new("word-wrap")
-                    .checked(settings.word_wrap)
-                    .on_change(set_toggle(|s, on| s.word_wrap = on)),
-                cx,
-            ))
-            .child(setting_row(
-                "Status bar",
-                "Show line, column, zoom and encoding",
-                Switch::new("status-bar")
-                    .checked(settings.status_bar)
-                    .on_change(set_toggle(|s, on| s.status_bar = on)),
-                cx,
-            ))
             .child(
-                div()
+                h_flex()
+                    .mx_6()
+                    .mb_5()
+                    .p(px(3.))
+                    .rounded(theme.radius_lg)
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.secondary)
+                    .children(SETTINGS_TABS.iter().enumerate().map(|(i, &label)| {
+                        let on = self.tab == i;
+                        div()
+                            .id(label)
+                            .flex_1()
+                            .h(px(26.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(theme.radius)
+                            .text_sm()
+                            .when(on, |d| {
+                                d.font_weight(FontWeight::MEDIUM)
+                                    .bg(theme.background)
+                                    .shadow_sm()
+                            })
+                            .when(!on, |d| {
+                                d.text_color(theme.muted_foreground)
+                                    .hover(|s| s.text_color(theme.foreground))
+                            })
+                            .child(label)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                window.blur(cx);
+                                this.tab = i;
+                                cx.notify();
+                            }))
+                    })),
+            )
+            .child(
+                v_flex()
+                    .id(("settings-tab", self.tab))
                     .flex_1()
-                    .items_end()
-                    .flex()
-                    .pt_2()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(concat!("Notey ", env!("CARGO_PKG_VERSION"))),
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px_6()
+                    .pb_6()
+                    .gap_5()
+                    .children(body),
             )
     }
 }
@@ -2597,26 +2727,13 @@ mod ui_tests {
         cx.update(|cx| {
             cx.global_mut::<super::Settings>().dark_theme = "Dracula".into();
         });
-        // The Themes window is open while the folder (re)loads.
-        let themes = cx.open_window(size(px(560.), px(360.)), |window, cx| {
-            let view = cx.new(|cx| super::ThemesView::new(window, cx));
-            Root::new(view, window, cx)
-        });
         cx.update(|cx| super::ThemeRegistry::watch_dir(dir.clone(), cx, |_| {}).unwrap());
         cx.run_until_parked();
-        // Reloads again, as an edit to the folder does.
-        cx.update(|cx| super::ThemeRegistry::watch_dir(dir.clone(), cx, |_| {}).unwrap());
-        cx.run_until_parked();
-        cx.update_window(themes.into(), |root, window, cx| {
-            window.render_frame(cx);
-            let view = root.downcast::<Root>().unwrap().read(cx).view().clone();
-            let view = view.downcast::<super::ThemesView>().unwrap();
-            let select = view.read(cx).dark_theme.read(cx);
-            assert_eq!(select.selected_value().map(String::as_str), Some("Dracula"));
-        })
-        .unwrap();
         cx.update(|cx| {
-            let names = super::themes_for(super::ThemeMode::Dark, cx);
+            let names: Vec<_> = super::themes_for(super::ThemeMode::Dark, cx)
+                .iter()
+                .map(|t| t.name.to_string())
+                .collect();
             for name in ["Default Dark", "My Dark", "Dracula"] {
                 assert!(
                     names.iter().any(|n| n == name),
@@ -2635,7 +2752,10 @@ mod ui_tests {
             let builtin: super::ThemeSet = serde_json::from_str(super::BUILTIN_THEMES).unwrap();
             let names = [super::ThemeMode::Light, super::ThemeMode::Dark]
                 .map(|mode| super::themes_for(mode, cx))
-                .concat();
+                .concat()
+                .iter()
+                .map(|t| t.name.to_string())
+                .collect::<Vec<_>>();
             assert!(
                 builtin
                     .themes
@@ -2651,7 +2771,7 @@ mod ui_tests {
             // The default is our own palette, not the kit's.
             cx.global_mut::<super::Settings>().appearance = super::Appearance::Dark;
             super::apply_appearance(cx);
-            let default: gpui_kit::Hsla = gpui_kit::rgb(0x1e1f22).into();
+            let default: gpui_kit::Hsla = gpui_kit::rgb(0x0f1115).into();
             assert_eq!(cx.theme().background, default);
 
             cx.global_mut::<super::Settings>().dark_theme = "Dracula".into();
