@@ -262,6 +262,8 @@ struct Settings {
     dark_theme: SharedString,
     word_wrap: bool,
     status_bar: bool,
+    /// Markdown files open with the preview beside them; the eye still toggles each tab.
+    preview: bool,
     font_family: SharedString,
     /// Font size in points.
     font_size: f32,
@@ -283,6 +285,7 @@ impl Default for Settings {
             dark_theme: DARK_THEME.into(),
             word_wrap: true,
             status_bar: true,
+            preview: true,
             font_family: DEFAULT_FONT.into(),
             font_size: 12.,
             folder: None,
@@ -883,7 +886,7 @@ impl Notepad {
             .update(cx, |editor, cx| editor.set_value(text, window, cx));
         doc.saved = doc.editor.read(cx).text().clone();
         (doc.path, doc.eol, doc.encoding, doc.dirty) = (Some(path), eol, encoding, false);
-        doc.preview = doc.is_markdown();
+        doc.preview = doc.is_markdown() && cx.global::<Settings>().preview;
         self.activate(ix, window, cx);
         true
     }
@@ -911,9 +914,9 @@ impl Notepad {
         doc.saved = doc.editor.read(cx).text().clone();
         let was_markdown = doc.is_markdown();
         (doc.path, doc.dirty) = (Some(path), false);
-        // Saving as .md turns the preview on, like opening one; a re-save keeps the user's toggle.
+        // Saving as .md shows the preview if the setting says so, like opening one; a re-save keeps the user's toggle.
         if !was_markdown && doc.is_markdown() {
-            doc.preview = true;
+            doc.preview = cx.global::<Settings>().preview;
         }
         self.rescan(cx);
         self.update_title(window);
@@ -2958,6 +2961,14 @@ impl Render for SettingsView {
                                 .on_change(set_toggle(|s, on| s.status_bar = on)),
                             cx,
                         ),
+                        setting_row(
+                            "Markdown preview",
+                            "Open .md files with the preview beside them",
+                            Switch::new("preview")
+                                .checked(settings.preview)
+                                .on_change(set_toggle(|s, on| s.preview = on)),
+                            cx,
+                        ),
                     ],
                     cx,
                 )
@@ -3496,6 +3507,7 @@ mod ui_tests {
             );
             assert_eq!(this.backlinks(), [dir.join("Home.md").as_path()]);
             assert_eq!(this.folder.as_ref().unwrap().notes.len(), 2);
+            assert!(this.doc().preview);
             // Remembered for new windows and the header's folder menu.
             let settings = cx.global::<super::Settings>();
             assert_eq!(
@@ -3503,8 +3515,11 @@ mod ui_tests {
                 (Some(&dir), Some(&dir))
             );
         });
-        // A link to a missing note creates it at the top of the notes folder.
+        // A link to a missing note creates it at the top of the notes folder,
+        // here with the preview setting off.
+        cx.update(|cx| cx.global_mut::<super::Settings>().preview = false);
         open_note(cx, "Fresh");
+        cx.read(|cx| assert!(!notepad.read(cx).doc().preview));
         assert!(dir.join("Fresh.md").is_file());
         cx.read(|cx| assert_eq!(notepad.read(cx).folder.as_ref().unwrap().notes.len(), 3));
         std::fs::remove_dir_all(dir).ok();
