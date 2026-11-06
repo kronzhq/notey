@@ -1,8 +1,24 @@
   <key>CFBundleDocumentTypes</key>
   <array>
+    <!-- Default rank: Notey can be the default app for .txt and .md
+         (Get Info → Open with → Change All). -->
     <dict>
       <key>CFBundleTypeName</key>
-      <string>Text Document</string>
+      <string>Plain Text Document</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Default</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.plain-text</string>
+        <string>net.daringfireball.markdown</string>
+      </array>
+    </dict>
+    <!-- Alternate rank: listed in "Open With" for everything else, never the default. -->
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Document</string>
       <key>CFBundleTypeRole</key>
       <string>Editor</string>
       <key>LSHandlerRank</key>
@@ -10,6 +26,35 @@
       <key>LSItemContentTypes</key>
       <array>
         <string>public.data</string>
+        <string>public.folder</string>
       </array>
+    </dict>
+  </array>
+  <!-- Older macOS versions don't declare a Markdown type, so .md would show up only
+       as generic data. Imported (not exported) so it defers to the system's
+       declaration where one exists. -->
+  <key>UTImportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>net.daringfireball.markdown</string>
+      <key>UTTypeDescription</key>
+      <string>Markdown Document</string>
+      <key>UTTypeConformsTo</key>
+      <array>
+        <string>public.plain-text</string>
+      </array>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array>
+          <string>md</string>
+          <string>markdown</string>
+        </array>
+        <key>public.mime-type</key>
+        <array>
+          <string>text/markdown</string>
+        </array>
+      </dict>
     </dict>
   </array>

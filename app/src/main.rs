@@ -3196,6 +3196,30 @@ impl SettingsView {
                             ),
                         cx,
                     ),
+                    {
+                        let is_default = is_default_app();
+                        setting_row(
+                            "Default app",
+                            if is_default {
+                                "Notey opens .txt and .md files"
+                            } else {
+                                "Open .txt and .md files with Notey"
+                            },
+                            h_flex().when(!is_default, |this| {
+                                this.child(
+                                    Button::new("make-default")
+                                        .outline()
+                                        .small()
+                                        .label("Make Default")
+                                        .on_click(|_, window, _| {
+                                            make_default_app();
+                                            window.refresh();
+                                        }),
+                                )
+                            }),
+                            cx,
+                        )
+                    },
                     setting_row(
                         "Markdown preview",
                         "Open .md files with the preview beside them",
@@ -3385,6 +3409,56 @@ impl Render for SettingsView {
 }
 
 /// Decodes a `file://…` URL, as macOS delivers for "Open With" and drag-onto-dock, into a path.
+/// The types Info-document-types.plist claims at `Default` rank.
+const DEFAULT_APP_TYPES: [&str; 2] = ["public.plain-text", "net.daringfireball.markdown"];
+const BUNDLE_ID: &str = "xyz.kronz.notey";
+const LS_ROLES_ALL: u32 = 0xFFFF_FFFF;
+
+// ponytail: deprecated since macOS 12 but still works; NSWorkspace's async
+// setDefaultApplication replaces it once the minimum system version is 12.
+#[link(name = "CoreServices", kind = "framework")]
+unsafe extern "C" {
+    fn LSCopyDefaultRoleHandlerForContentType(
+        uti: core_foundation::string::CFStringRef,
+        role: u32,
+    ) -> core_foundation::string::CFStringRef;
+    fn LSSetDefaultRoleHandlerForContentType(
+        uti: core_foundation::string::CFStringRef,
+        role: u32,
+        bundle_id: core_foundation::string::CFStringRef,
+    ) -> i32;
+}
+
+/// Whether Notey already opens .txt and .md files.
+fn is_default_app() -> bool {
+    use core_foundation::{base::TCFType, string::CFString};
+    DEFAULT_APP_TYPES.iter().all(|uti| {
+        let uti = CFString::new(uti);
+        let handler = unsafe {
+            LSCopyDefaultRoleHandlerForContentType(uti.as_concrete_TypeRef(), LS_ROLES_ALL)
+        };
+        !handler.is_null()
+            && unsafe { CFString::wrap_under_create_rule(handler) }
+                .to_string()
+                .eq_ignore_ascii_case(BUNDLE_ID)
+    })
+}
+
+fn make_default_app() {
+    use core_foundation::{base::TCFType, string::CFString};
+    let id = CFString::new(BUNDLE_ID);
+    for uti in DEFAULT_APP_TYPES {
+        let uti = CFString::new(uti);
+        unsafe {
+            LSSetDefaultRoleHandlerForContentType(
+                uti.as_concrete_TypeRef(),
+                LS_ROLES_ALL,
+                id.as_concrete_TypeRef(),
+            );
+        }
+    }
+}
+
 fn url_to_path(url: &str) -> Option<PathBuf> {
     let path = url.strip_prefix("file://")?;
     let mut bytes = Vec::with_capacity(path.len());
