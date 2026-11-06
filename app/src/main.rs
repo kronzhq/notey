@@ -77,12 +77,12 @@ struct OpenRecent(PathBuf);
 #[action(namespace = notepad, no_json)]
 struct Export(ExportFormat);
 
-/// Opens a note: a path (sidebar, backlinks) or a `[[link]]`/markdown link target (preview).
+/// Opens a note by path or link target.
 #[derive(Clone, PartialEq, Debug, Action)]
 #[action(namespace = notepad, no_json)]
 struct OpenNote(SharedString);
 
-/// Switches this window to a notes folder from the sidebar header's menu.
+/// Switches this window to another notes folder.
 #[derive(Clone, PartialEq, Debug, Action)]
 #[action(namespace = notepad, no_json)]
 struct SwitchFolder(PathBuf);
@@ -136,7 +136,7 @@ fn is_markdown(path: &Path) -> bool {
 }
 
 /// Each `[[target#heading|label]]` in `text`: its byte range, target and label.
-// ponytail: also matches inside code blocks; skip fenced code if that bites.
+// Also matches inside code blocks.
 fn wiki_links(text: &str) -> Vec<(std::ops::Range<usize>, &str, &str)> {
     let mut links = Vec::new();
     let mut from = 0;
@@ -158,8 +158,7 @@ fn wiki_links(text: &str) -> Vec<(std::ops::Range<usize>, &str, &str)> {
     links
 }
 
-/// `text` with each `[[link]]` as a markdown link the preview can click (`wiki:` URL).
-/// Embeds (`![[x]]`) become plain links too.
+/// Turns `[[links]]` (and `![[embeds]]`) into markdown links with `wiki:` URLs.
 fn wikify(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut last = 0;
@@ -175,8 +174,7 @@ fn wikify(text: &str) -> String {
     out
 }
 
-/// Whether a lowercased link target names the note at `path`: by file name, or
-/// by its path inside the notes folder `dir`.
+/// Whether a lowercased link target names `path`, by file name or path inside `dir`.
 fn links_to(target: &str, path: &Path, dir: &Path) -> bool {
     let rel = path.strip_prefix(dir).unwrap_or(path).with_extension("");
     let stem = path.file_stem().unwrap_or_default();
@@ -185,46 +183,106 @@ fn links_to(target: &str, path: &Path, dir: &Path) -> bool {
         .any(|name| name.to_string_lossy().to_lowercase() == target)
 }
 
-/// The notes folder's subfolders and markdown notes as sidebar items, folders first.
-/// Dot-folders (`.obsidian`, `.git`) and symlinks are skipped; each note's path
-/// is pushed onto `notes`.
-fn walk_folder(
-    dir: &Path,
-    collapsed: &HashSet<SharedString>,
-    notes: &mut Vec<PathBuf>,
-) -> Vec<TreeItem> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut paths: Vec<PathBuf> = entries
+/// Files the sidebar lists: markdown notes and plain `.txt` files.
+fn is_note(path: &Path) -> bool {
+    is_markdown(path)
+        || path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("txt"))
+}
+
+/// A scanned folder or note; plain data so the scan can run in the background.
+#[derive(Clone)]
+struct Found {
+    path: PathBuf,
+    children: Option<Vec<Found>>,
+}
+
+/// Folders and notes under `dir`, skipping hidden and ignored files. Each note and
+/// its links go on `notes`.
+fn scan_folder(dir: &Path, notes: &mut Vec<(PathBuf, Vec<String>)>) -> Vec<Found> {
+    let paths: Vec<PathBuf> = ignore::WalkBuilder::new(dir)
+        // Honor .gitignore outside git repos too.
+        .require_git(false)
+        .build()
         .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| !t.is_symlink()))
-        .map(|e| e.path())
-        .filter(|p| {
-            !p.file_name()
-                .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+        .filter(|e| e.file_type().is_some_and(|t| t.is_file()) && is_note(e.path()))
+        .map(ignore::DirEntry::into_path)
+        .collect();
+    nest(dir, paths, notes)
+}
+
+/// Groups note paths under `dir` into folders, recursively.
+fn nest(dir: &Path, paths: Vec<PathBuf>, notes: &mut Vec<(PathBuf, Vec<String>)>) -> Vec<Found> {
+    let mut folders: Vec<(PathBuf, Vec<PathBuf>)> = Vec::new();
+    let mut index = std::collections::HashMap::new();
+    let mut files = Vec::new();
+    for path in paths {
+        let mut parts = path.strip_prefix(dir).unwrap_or(&path).components();
+        let (Some(first), Some(_)) = (parts.next(), parts.next()) else {
+            files.push(path);
+            continue;
+        };
+        let sub = dir.join(first);
+        let ix = *index.entry(sub.clone()).or_insert_with(|| {
+            folders.push((sub, Vec::new()));
+            folders.len() - 1
+        });
+        folders[ix].1.push(path);
+    }
+    let by_name = |p: &PathBuf| {
+        p.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase()
+    };
+    folders.sort_by_cached_key(|(f, _)| by_name(f));
+    files.sort_by_cached_key(by_name);
+    let folders: Vec<Found> = folders
+        .into_iter()
+        .map(|(path, inside)| Found {
+            children: Some(nest(&path, inside, notes)),
+            path,
         })
         .collect();
-    paths.sort_by_cached_key(|p| (!p.is_dir(), p.to_string_lossy().to_lowercase()));
-    paths
+    let files = files.into_iter().map(|path| {
+        notes.push((path.clone(), note_links(&path)));
+        Found {
+            path,
+            children: None,
+        }
+    });
+    folders.into_iter().chain(files).collect()
+}
+
+/// The lowercased `[[link]]` targets in a note; files over 1 MB are skipped.
+fn note_links(path: &Path) -> Vec<String> {
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > 1 << 20) {
+        return Vec::new();
+    }
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    wiki_links(&text)
+        .iter()
+        .map(|l| l.1.to_lowercase())
+        .collect()
+}
+
+/// Sidebar rows for a scan. Notes drop `.md`; other files keep their extension.
+fn tree_items(found: Vec<Found>, expanded: &HashSet<SharedString>) -> Vec<TreeItem> {
+    found
         .into_iter()
-        .filter_map(|path| {
-            let id: SharedString = path.to_string_lossy().into_owned().into();
-            if path.is_dir() {
-                let name = path.file_name()?.to_string_lossy().into_owned();
-                let children = walk_folder(&path, collapsed, notes);
-                let expanded = !collapsed.contains(&id);
-                (!children.is_empty()).then(|| {
-                    TreeItem::new(id, name)
-                        .expanded(expanded)
-                        .children(children)
-                })
-            } else if is_markdown(&path) {
-                let name = path.file_stem()?.to_string_lossy().into_owned();
-                notes.push(path);
-                Some(TreeItem::new(id, name))
-            } else {
-                None
+        .map(|found| {
+            let id: SharedString = found.path.to_string_lossy().into_owned().into();
+            let name = match &found.children {
+                None if is_markdown(&found.path) => found.path.file_stem(),
+                _ => found.path.file_name(),
+            };
+            let name = name.unwrap_or_default().to_string_lossy().into_owned();
+            match found.children {
+                Some(children) => TreeItem::new(id.clone(), name)
+                    .expanded(expanded.contains(&id))
+                    .children(tree_items(children, expanded)),
+                None => TreeItem::new(id, name),
             }
         })
         .collect()
@@ -234,10 +292,14 @@ fn walk_folder(
 struct NotesFolder {
     dir: PathBuf,
     tree: Entity<TreeState>,
-    /// Folders collapsed by hand, kept across rescans.
-    collapsed: HashSet<SharedString>,
+    /// Folders opened by hand; the rest start collapsed.
+    expanded: HashSet<SharedString>,
     /// Every note and the lowercased `[[link]]` targets in it.
     notes: Vec<(PathBuf, Vec<String>)>,
+    /// The last scan, to rebuild rows without rescanning.
+    found: Vec<Found>,
+    /// The running scan; replacing it cancels it.
+    _scan: Task<()>,
     _subscription: Subscription,
 }
 
@@ -262,14 +324,14 @@ struct Settings {
     dark_theme: SharedString,
     word_wrap: bool,
     status_bar: bool,
-    /// Markdown files open with the preview beside them; the eye still toggles each tab.
+    /// Open markdown files with the preview shown.
     preview: bool,
     font_family: SharedString,
     /// Font size in points.
     font_size: f32,
-    /// The folder of notes new windows open; the last one opened.
+    /// The notes folder new windows open.
     folder: Option<PathBuf>,
-    /// Notes folders opened lately, newest first, for the sidebar header's menu.
+    /// Recently opened notes folders, newest first.
     folders: Vec<PathBuf>,
     /// Most recently opened or saved files, newest first.
     #[serde(skip)]
@@ -335,7 +397,7 @@ fn support_dir() -> Option<PathBuf> {
     Some(std::env::home_dir()?.join("Library/Application Support/Notey"))
 }
 
-/// Makes `dir` the notes folder new windows open, first in the sidebar header's menu.
+/// Makes `dir` the folder new windows open, first in the recent list.
 fn remember_folder(dir: PathBuf, cx: &mut App) {
     let settings = cx.global::<Settings>();
     if settings.folder.as_ref() == Some(&dir) && settings.folders.first() == Some(&dir) {
@@ -684,7 +746,7 @@ impl Notepad {
             }),
             // Only matters while the theme is "Use system setting".
             cx.observe_window_appearance(window, |_, _, cx| apply_appearance(cx)),
-            // Coming back to the window picks up notes changed elsewhere.
+            // Pick up changes made outside the app.
             cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
                     this.rescan(cx);
@@ -846,7 +908,7 @@ impl Notepad {
     /// switching to a tab that already has the file.
     fn open_paths(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         for path in paths {
-            // A dropped (or command-line) folder becomes the notes folder.
+            // A folder opens as the notes folder.
             if path.is_dir() {
                 self.set_folder(path, cx);
                 continue;
@@ -928,7 +990,7 @@ impl Notepad {
         doc.saved = doc.editor.read(cx).text().clone();
         let was_markdown = doc.is_markdown();
         (doc.path, doc.dirty) = (Some(path), false);
-        // Saving as .md shows the preview if the setting says so, like opening one; a re-save keeps the user's toggle.
+        // Saving as .md applies the preview setting; a re-save keeps the tab's toggle.
         if !was_markdown && doc.is_markdown() {
             doc.preview = cx.global::<Settings>().preview;
         }
@@ -1224,16 +1286,18 @@ impl Notepad {
         let subscription = cx.subscribe(&tree, |this, _, event: &TreeEvent, _| {
             if let Some(folder) = &mut this.folder {
                 match event {
-                    TreeEvent::Collapsed(id) => folder.collapsed.insert(id.clone()),
-                    TreeEvent::Expanded(id) => folder.collapsed.remove(id),
+                    TreeEvent::Expanded(id) => folder.expanded.insert(id.clone()),
+                    TreeEvent::Collapsed(id) => folder.expanded.remove(id),
                 };
             }
         });
         self.folder = Some(NotesFolder {
             dir,
             tree,
-            collapsed: HashSet::new(),
+            expanded: HashSet::new(),
             notes: Vec::new(),
+            found: Vec::new(),
+            _scan: Task::ready(()),
             _subscription: subscription,
         });
         self.sidebar = true;
@@ -1243,32 +1307,50 @@ impl Notepad {
         }
     }
 
-    /// Re-reads the notes folder's files and links.
-    // ponytail: reads every note on each rescan (open, save, window focus); keep a
-    // per-file index keyed by mtime if big folders lag.
+    /// Rescans the notes folder in the background.
+    // Rereads every note each time; cache by mtime if large folders lag.
     fn rescan(&mut self, cx: &mut Context<Self>) {
         let Some(folder) = &mut self.folder else {
             return;
         };
-        let mut paths = Vec::new();
-        let items = walk_folder(&folder.dir, &folder.collapsed, &mut paths);
-        folder.notes = paths
-            .into_iter()
-            .map(|path| {
-                let text = std::fs::read_to_string(&path).unwrap_or_default();
-                let links = wiki_links(&text)
-                    .iter()
-                    .map(|l| l.1.to_lowercase())
-                    .collect();
-                (path, links)
+        let dir = folder.dir.clone();
+        let scan = cx.background_executor().spawn(async move {
+            let mut notes = Vec::new();
+            let found = scan_folder(&dir, &mut notes);
+            (found, notes)
+        });
+        folder._scan = cx.spawn(async move |this, cx| {
+            let (found, notes) = scan.await;
+            this.update(cx, |this, cx| {
+                let Some(folder) = &mut this.folder else {
+                    return;
+                };
+                (folder.notes, folder.found) = (notes, found);
+                this.show_tree(cx);
             })
-            .collect();
+            .ok();
+        });
+    }
+
+    /// Rebuilds the sidebar rows from the last scan, keeping folders opened by hand.
+    fn show_tree(&mut self, cx: &mut Context<Self>) {
+        let Some(folder) = &self.folder else {
+            return;
+        };
+        let items = tree_items(folder.found.clone(), &folder.expanded);
         folder.tree.update(cx, |tree, cx| tree.set_items(items, cx));
         cx.notify();
     }
 
-    /// Where a link points: an absolute path, a file beside the open note, a note in
-    /// the notes folder by name or path, or else a new note to create (in the notes folder, or beside the open note).
+    fn collapse_all(&mut self, cx: &mut Context<Self>) {
+        if let Some(folder) = &mut self.folder {
+            folder.expanded.clear();
+            self.show_tree(cx);
+        }
+    }
+
+    /// Resolves a link: an absolute path, a file beside the open note, a note by name
+    /// or path, or else where a new note would go.
     fn resolve_note(&self, target: &str) -> Option<PathBuf> {
         let target = target.split('#').next()?.trim();
         if target.is_empty() {
@@ -1316,7 +1398,7 @@ impl Notepad {
         self.open_paths(vec![path], window, cx);
     }
 
-    /// With a notes folder open, asks for a name and opens that note (new or existing); else a new tab.
+    /// Asks for a name and opens or creates that note; without a notes folder, a new tab.
     fn new_note(&mut self, _: &NewNote, window: &mut Window, cx: &mut Context<Self>) {
         if self.folder.is_none() {
             self.add_tab(window, cx);
@@ -1376,7 +1458,7 @@ impl Notepad {
             .collect()
     }
 
-    /// The folder's name; its menu switches folders and shows where the notes live.
+    /// The folder name, with a menu to switch folders or reveal it.
     fn render_folder_menu(
         &self,
         folder: &NotesFolder,
@@ -1385,7 +1467,7 @@ impl Notepad {
     ) -> impl IntoElement + use<> {
         let action_context = self.editor().read(cx).focus_handle(cx);
         let current = folder.dir.clone();
-        // The default folder always stays one click away.
+        // Always offer the default folder.
         let mut folders = cx.global::<Settings>().folders.clone();
         folders.extend(default_folder().filter(|d| !folders.contains(d)));
         folders.retain(|d| d.is_dir());
@@ -1415,7 +1497,7 @@ impl Notepad {
     }
 
     /// The sidebar's header (folder name, New Note) and body (notes, backlinks).
-    // ponytail: fixed width; make it a resizable panel if people ask.
+    // Fixed width; make it resizable if needed.
     fn render_sidebar(&self, folder: &NotesFolder, cx: &mut Context<Self>) -> (Div, Div) {
         let theme = cx.theme();
         let row = |id: (&'static str, usize), path: &Path| {
@@ -1457,13 +1539,33 @@ impl Notepad {
             .border_color(theme.border)
             .child(self.render_folder_menu(folder, name, cx))
             .child(
-                Button::new("new-note")
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::Plus)
-                    .tooltip("New note")
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.new_note(&NewNote, window, cx)),
+                h_flex()
+                    .flex_none()
+                    .child(
+                        Button::new("new-note")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Plus)
+                            .tooltip("New note")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.new_note(&NewNote, window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("refresh-folder")
+                            .ghost()
+                            .xsmall()
+                            .icon(gpui_kit::assets::IconName::RefreshCw)
+                            .tooltip("Refresh")
+                            .on_click(cx.listener(|this, _, _, cx| this.rescan(cx))),
+                    )
+                    .child(
+                        Button::new("collapse-folders")
+                            .ghost()
+                            .xsmall()
+                            .icon(gpui_kit::assets::IconName::ChevronsDownUp)
+                            .tooltip("Collapse folders")
+                            .on_click(cx.listener(|this, _, _, cx| this.collapse_all(cx))),
                     ),
             );
         let body = v_flex()
@@ -1483,21 +1585,45 @@ impl Notepad {
             })
             .child(div().flex_1().min_h_0().py_1().child(tree(
                 &folder.tree,
-                |ix, entry, _, _, _| {
+                |ix, entry, _, _, cx| {
                     let item = entry.item();
-                    let icon = match (entry.is_folder(), entry.is_expanded()) {
-                        (true, true) => IconName::FolderOpen,
-                        (true, false) => IconName::FolderClosed,
-                        _ => IconName::FileText,
+                    let line = cx.theme().border;
+                    const ROW: f32 = 26.;
+                    // One indent guide per level; folders get a disclosure chevron.
+                    let guide = || {
+                        div()
+                            .flex_none()
+                            .w(px(14.))
+                            .h(px(ROW))
+                            .flex()
+                            .justify_center()
+                            .child(div().w(px(1.)).h_full().bg(line))
                     };
+                    let chevron = div()
+                        .flex_none()
+                        .w(px(14.))
+                        .when(entry.is_folder(), |this| {
+                            this.child(
+                                Icon::new(if entry.is_expanded() {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .xsmall(),
+                            )
+                        });
                     let row = ListItem::new(ix)
-                        .pl(px(10. + 14. * entry.depth() as f32))
+                        .h(px(ROW))
+                        .py_0()
+                        .pl(px(8.))
+                        .pr_2()
                         .text_sm()
                         .child(
                             h_flex()
-                                .gap_2()
-                                .child(Icon::new(icon).small())
-                                .child(item.label.clone()),
+                                .h_full()
+                                .children((0..entry.depth()).map(|_| guide()))
+                                .child(chevron)
+                                .child(div().min_w_0().truncate().child(item.label.clone())),
                         );
                     if entry.is_folder() {
                         return row;
@@ -1790,6 +1916,7 @@ impl Notepad {
         let action_context = self.editor().read(cx).focus_handle(cx);
         let doc = self.doc();
         let preview = doc.is_markdown().then_some(doc.preview);
+        let sidebar = self.folder.is_some().then_some(self.sidebar);
         let theme = cx.theme();
         h_flex()
             .flex_none()
@@ -1799,6 +1926,23 @@ impl Notepad {
             .bg(theme.secondary)
             .border_b_1()
             .border_color(theme.border)
+            .when_some(sidebar, |this, on| {
+                this.child(
+                    Button::new("toggle-sidebar")
+                        .ghost()
+                        .small()
+                        .icon(if on {
+                            IconName::PanelLeftClose
+                        } else {
+                            IconName::PanelLeftOpen
+                        })
+                        .tooltip(if on { "Hide sidebar" } else { "Show sidebar" })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.sidebar ^= true;
+                            cx.notify();
+                        })),
+                )
+            })
             .children(
                 menus(&settings, false)
                     .into_iter()
@@ -1893,7 +2037,7 @@ impl Render for Notepad {
                 ("preview", doc.id().as_u64() as usize),
                 wikify(&editor.read(cx).value()),
             )
-            // Web links open in the browser; `[[links]]` and relative ones open as notes.
+            // Web links open in the browser, everything else as a note.
             .on_link_click(|url, _, window, cx| {
                 if url.contains("://") || url.starts_with("mailto:") {
                     cx.open_url(url);
@@ -1991,7 +2135,7 @@ impl Render for Notepad {
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom_by(10, cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom_by(-10, cx)))
             .on_action(cx.listener(|this, _: &ZoomReset, _, cx| this.zoom_by(0, cx)))
-            // The sidebar's header shares the tab row, so the two always line up.
+            // The sidebar header shares the tab row so their heights match.
             .child(
                 h_flex()
                     .flex_none()
@@ -2423,6 +2567,29 @@ fn find_theme(name: &str, cx: &App) -> Option<Rc<ThemeConfig>> {
                 .find(|t| t.name == name)
         })
         .cloned()
+}
+
+// Icons beyond the kit's default set.
+gpui_kit::assets::icon_assets!(ExtraIcons, [RefreshCw, ChevronsDownUp]);
+
+/// The kit's icons plus `ExtraIcons`.
+struct AppAssets;
+
+impl AssetSource for AppAssets {
+    fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        match ExtraIcons.load(path)? {
+            Some(bytes) => Ok(Some(bytes)),
+            None => gpui_kit::assets::Assets.load(path),
+        }
+    }
+
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        let mut paths = gpui_kit::assets::Assets.list(path)?;
+        paths.extend(ExtraIcons.list(path)?);
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
 }
 
 /// Lilex isn't a system font, so it ships inside the binary (OFL, see fonts/OFL.txt).
@@ -3234,7 +3401,7 @@ fn main() {
     // Before `init`, which creates the support dir (for the themes folder).
     let welcome = first_run_welcome();
     let (open_tx, open_rx) = async_channel::unbounded::<Vec<PathBuf>>();
-    let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    let app = gpui_kit::application().with_assets(AppAssets);
     // Like other Mac document apps, closing the last window leaves the app running;
     // clicking its Dock icon then brings a window back.
     app.on_reopen(|cx| {
@@ -3292,10 +3459,7 @@ fn main() {
 #[cfg(feature = "snapshot")]
 fn snapshot(out: &str, paths: Vec<PathBuf>) {
     let platform = gpui_kit::platform::current_platform(false);
-    let mut cx = VisualTestAppContext::with_asset_source(
-        platform,
-        std::sync::Arc::new(gpui_kit::assets::Assets),
-    );
+    let mut cx = VisualTestAppContext::with_asset_source(platform, std::sync::Arc::new(AppAssets));
     cx.update(init);
     let dark = std::env::var("NP_DARK").is_ok();
     let snapshot_size = match std::env::var("NP_SETTINGS") {
@@ -3572,22 +3736,26 @@ mod ui_tests {
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::create_dir_all(dir.join(".obsidian")).unwrap();
+        std::fs::create_dir_all(dir.join("node_modules/pkg")).unwrap();
+        std::fs::write(dir.join("node_modules/pkg/README.md"), "[[target]]").unwrap();
+        std::fs::write(dir.join(".gitignore"), "node_modules/\n").unwrap();
         std::fs::write(dir.join("Home.md"), "go to [[target]] and [[Fresh]]").unwrap();
         std::fs::write(dir.join("sub/Target.md"), "# T").unwrap();
         std::fs::write(dir.join(".obsidian/Hidden.md"), "[[target]]").unwrap();
+        std::fs::write(dir.join("todo.txt"), "plain").unwrap();
+        std::fs::write(dir.join("photo.png"), "").unwrap();
+        // Let the background scan finish.
+        notepad.update(cx, |this, cx| this.set_folder(dir.clone(), cx));
+        cx.run_until_parked();
         let open_note = |cx: &mut TestAppContext, target: &str| {
             let action = OpenNote(target.to_string().into());
             cx.update_window(handle, |_, window, cx| {
-                notepad.update(cx, |this, cx| {
-                    if this.folder.is_none() {
-                        this.set_folder(dir.clone(), cx);
-                    }
-                    this.open_note(&action, window, cx)
-                })
+                notepad.update(cx, |this, cx| this.open_note(&action, window, cx))
             })
             .unwrap();
+            cx.run_until_parked();
         };
-        // By name, case-insensitively, from another folder; dot-folders don't count.
+        // By name, case-insensitively, across folders.
         open_note(cx, "target");
         cx.read(|cx| {
             let this = notepad.read(cx);
@@ -3596,7 +3764,8 @@ mod ui_tests {
                 Some(dir.join("sub/Target.md").as_path())
             );
             assert_eq!(this.backlinks(), [dir.join("Home.md").as_path()]);
-            assert_eq!(this.folder.as_ref().unwrap().notes.len(), 2);
+            // Notes and .txt files are listed; other files aren't.
+            assert_eq!(this.folder.as_ref().unwrap().notes.len(), 3);
             assert!(this.doc().preview);
             // Remembered for new windows and the header's folder menu.
             let settings = cx.global::<super::Settings>();
@@ -3605,13 +3774,21 @@ mod ui_tests {
                 (Some(&dir), Some(&dir))
             );
         });
-        // A link to a missing note creates it at the top of the notes folder,
-        // here with the preview setting off.
+        // A missing note is created at the top level, here with the preview setting off.
         cx.update(|cx| cx.global_mut::<super::Settings>().preview = false);
         open_note(cx, "Fresh");
         cx.read(|cx| assert!(!notepad.read(cx).doc().preview));
         assert!(dir.join("Fresh.md").is_file());
-        cx.read(|cx| assert_eq!(notepad.read(cx).folder.as_ref().unwrap().notes.len(), 3));
+        cx.read(|cx| assert_eq!(notepad.read(cx).folder.as_ref().unwrap().notes.len(), 4));
+        notepad.update(cx, |this, cx| {
+            this.folder
+                .as_mut()
+                .unwrap()
+                .expanded
+                .insert(dir.join("sub").to_string_lossy().into_owned().into());
+            this.collapse_all(cx);
+            assert!(this.folder.as_ref().unwrap().expanded.is_empty());
+        });
         std::fs::remove_dir_all(dir).ok();
     }
 
