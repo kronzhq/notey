@@ -167,7 +167,9 @@ fn wikify(text: &str) -> String {
         if out.ends_with('!') {
             out.pop();
         }
-        out.push_str(&format!("[{label}](<wiki:{target}>)"));
+        for part in ["[", label, "](<wiki:", target, ">)"] {
+            out.push_str(part);
+        }
         last = range.end;
     }
     out.push_str(&text[last..]);
@@ -677,6 +679,8 @@ struct Doc {
     preview: bool,
     /// Bumped to reset the preview split: it keys the divider state.
     split_resets: usize,
+    /// The preview's markdown, rebuilt only when the text changes.
+    preview_text: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -870,6 +874,7 @@ impl Notepad {
             encoding: Encoding::Utf8,
             preview: false,
             split_resets: 0,
+            preview_text: None,
             _subscriptions: subscriptions,
         });
         self.activate(self.docs.len() - 1, window, cx);
@@ -894,6 +899,7 @@ impl Notepad {
     fn refresh_dirty(&mut self, id: EntityId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ix) = self.doc_ix(id) else { return };
         let doc = &mut self.docs[ix];
+        doc.preview_text = None;
         // ponytail: compares the whole text per edit (length first); track the undo
         // position instead if huge files lag.
         let dirty = doc.editor.read(cx).text() != &doc.saved;
@@ -963,6 +969,7 @@ impl Notepad {
         doc.saved = doc.editor.read(cx).text().clone();
         (doc.path, doc.eol, doc.encoding, doc.dirty) = (Some(path), eol, encoding, false);
         doc.preview = doc.is_markdown() && cx.global::<Settings>().preview;
+        doc.preview_text = None;
         self.activate(ix, window, cx);
         true
     }
@@ -1987,6 +1994,10 @@ impl Notepad {
 
 impl Render for Notepad {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let doc = &mut self.docs[self.active];
+        if doc.preview && doc.is_markdown() && doc.preview_text.is_none() {
+            doc.preview_text = Some(wikify(&doc.editor.read(cx).value()).into());
+        }
         let settings = cx.global::<Settings>().clone();
         let font_px = settings.font_size * 4. / 3. * self.zoom as f32 / 100.;
         let doc = self.doc();
@@ -2035,7 +2046,7 @@ impl Render for Notepad {
             let theme = cx.theme();
             TextView::markdown(
                 ("preview", doc.id().as_u64() as usize),
-                wikify(&editor.read(cx).value()),
+                doc.preview_text.clone().unwrap_or_default(),
             )
             // Web links open in the browser, everything else as a note.
             .on_link_click(|url, _, window, cx| {
@@ -3774,6 +3785,29 @@ mod ui_tests {
                 (Some(&dir), Some(&dir))
             );
         });
+        // The preview's cached markdown follows edits.
+        let preview_text = |cx: &mut TestAppContext| {
+            cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+                .unwrap();
+            cx.read(|cx| {
+                notepad
+                    .read(cx)
+                    .doc()
+                    .preview_text
+                    .clone()
+                    .unwrap_or_default()
+            })
+        };
+        assert_eq!(preview_text(cx), "# T");
+        cx.update_window(handle, |_, window, cx| {
+            notepad.update(cx, |this, cx| {
+                let editor = this.editor();
+                editor.update(cx, |e, cx| e.set_value("see [[Home]]", window, cx));
+                this.refresh_dirty(editor.entity_id(), window, cx);
+            })
+        })
+        .unwrap();
+        assert_eq!(preview_text(cx), "see [Home](<wiki:Home>)");
         // A missing note is created at the top level, here with the preview setting off.
         cx.update(|cx| cx.global_mut::<super::Settings>().preview = false);
         open_note(cx, "Fresh");
