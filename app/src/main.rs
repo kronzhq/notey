@@ -3,6 +3,7 @@ mod export;
 mod updater;
 
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
@@ -19,6 +20,7 @@ use gpui_kit::component::{
     input::{
         self, Input, InputEvent, InputState, Position, Rope, RopeExt as _, Textarea, TextareaState,
     },
+    list::ListItem,
     menu::{DropdownMenu as _, PopupMenu},
     resizable::{h_resizable, resizable_panel},
     searchable_list::SearchableVec,
@@ -26,6 +28,7 @@ use gpui_kit::component::{
     switch::Switch,
     tab::{Tab, TabBar},
     text::{TextView, TextViewStyle},
+    tree::{TreeEvent, TreeItem, TreeState, tree},
     v_flex,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
@@ -57,6 +60,10 @@ actions!(
         About,
         ClearRecent,
         CheckForUpdates,
+        OpenFolder,
+        NewNote,
+        ToggleSidebar,
+        RevealFolder,
     ]
 );
 
@@ -69,6 +76,16 @@ struct OpenRecent(PathBuf);
 #[derive(Clone, Copy, PartialEq, Debug, Action)]
 #[action(namespace = notepad, no_json)]
 struct Export(ExportFormat);
+
+/// Opens a note: a path (sidebar, backlinks) or a `[[link]]`/markdown link target (preview).
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = notepad, no_json)]
+struct OpenNote(SharedString);
+
+/// Switches this window to a notes folder from the sidebar header's menu.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = notepad, no_json)]
+struct SwitchFolder(PathBuf);
 
 const MAX_RECENT: usize = 10;
 
@@ -113,6 +130,117 @@ fn slash_matches(query: &str) -> Vec<usize> {
         .collect()
 }
 
+fn is_markdown(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown"))
+}
+
+/// Each `[[target#heading|label]]` in `text`: its byte range, target and label.
+// ponytail: also matches inside code blocks; skip fenced code if that bites.
+fn wiki_links(text: &str) -> Vec<(std::ops::Range<usize>, &str, &str)> {
+    let mut links = Vec::new();
+    let mut from = 0;
+    while let Some(open) = text[from..].find("[[") {
+        let start = from + open;
+        let Some(len) = text[start + 2..].find("]]") else {
+            break;
+        };
+        let inner = &text[start + 2..start + 2 + len];
+        let (link, label) = inner.split_once('|').unwrap_or((inner, inner));
+        let target = link.split('#').next().unwrap_or_default().trim();
+        if target.is_empty() || inner.contains('\n') || inner.contains("[[") {
+            from = start + 2;
+            continue;
+        }
+        from = start + len + 4;
+        links.push((start..from, target, label.trim()));
+    }
+    links
+}
+
+/// `text` with each `[[link]]` as a markdown link the preview can click (`wiki:` URL).
+/// Embeds (`![[x]]`) become plain links too.
+fn wikify(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for (range, target, label) in wiki_links(text) {
+        out.push_str(&text[last..range.start]);
+        if out.ends_with('!') {
+            out.pop();
+        }
+        out.push_str(&format!("[{label}](<wiki:{target}>)"));
+        last = range.end;
+    }
+    out.push_str(&text[last..]);
+    out
+}
+
+/// Whether a lowercased link target names the note at `path`: by file name, or
+/// by its path inside the notes folder `dir`.
+fn links_to(target: &str, path: &Path, dir: &Path) -> bool {
+    let rel = path.strip_prefix(dir).unwrap_or(path).with_extension("");
+    let stem = path.file_stem().unwrap_or_default();
+    [rel.as_os_str(), stem]
+        .iter()
+        .any(|name| name.to_string_lossy().to_lowercase() == target)
+}
+
+/// The notes folder's subfolders and markdown notes as sidebar items, folders first.
+/// Dot-folders (`.obsidian`, `.git`) and symlinks are skipped; each note's path
+/// is pushed onto `notes`.
+fn walk_folder(
+    dir: &Path,
+    collapsed: &HashSet<SharedString>,
+    notes: &mut Vec<PathBuf>,
+) -> Vec<TreeItem> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| !t.is_symlink()))
+        .map(|e| e.path())
+        .filter(|p| {
+            !p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+        })
+        .collect();
+    paths.sort_by_cached_key(|p| (!p.is_dir(), p.to_string_lossy().to_lowercase()));
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let id: SharedString = path.to_string_lossy().into_owned().into();
+            if path.is_dir() {
+                let name = path.file_name()?.to_string_lossy().into_owned();
+                let children = walk_folder(&path, collapsed, notes);
+                let expanded = !collapsed.contains(&id);
+                (!children.is_empty()).then(|| {
+                    TreeItem::new(id, name)
+                        .expanded(expanded)
+                        .children(children)
+                })
+            } else if is_markdown(&path) {
+                let name = path.file_stem()?.to_string_lossy().into_owned();
+                notes.push(path);
+                Some(TreeItem::new(id, name))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// A folder of notes (File > Open Folder…), shown in the sidebar.
+struct NotesFolder {
+    dir: PathBuf,
+    tree: Entity<TreeState>,
+    /// Folders collapsed by hand, kept across rescans.
+    collapsed: HashSet<SharedString>,
+    /// Every note and the lowercased `[[link]]` targets in it.
+    notes: Vec<(PathBuf, Vec<String>)>,
+    _subscription: Subscription,
+}
+
 const DEFAULT_FONT: &str = "Lilex";
 /// Line height as a multiple of the editor font size.
 const LINE_SPACING: f32 = 1.45;
@@ -137,6 +265,10 @@ struct Settings {
     font_family: SharedString,
     /// Font size in points.
     font_size: f32,
+    /// The folder of notes new windows open; the last one opened.
+    folder: Option<PathBuf>,
+    /// Notes folders opened lately, newest first, for the sidebar header's menu.
+    folders: Vec<PathBuf>,
     /// Most recently opened or saved files, newest first.
     #[serde(skip)]
     recent: Vec<PathBuf>,
@@ -153,6 +285,8 @@ impl Default for Settings {
             status_bar: true,
             font_family: DEFAULT_FONT.into(),
             font_size: 12.,
+            folder: None,
+            folders: Vec::new(),
             recent: Vec::new(),
         }
     }
@@ -196,6 +330,14 @@ fn support_dir() -> Option<PathBuf> {
         return None;
     }
     Some(std::env::home_dir()?.join("Library/Application Support/Notey"))
+}
+
+/// The notes folder until another is opened; none in tests.
+fn default_folder() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    Some(std::env::home_dir()?.join("Documents/Notey"))
 }
 
 fn recent_file() -> Option<PathBuf> {
@@ -281,6 +423,8 @@ struct TabState {
 struct WindowState {
     tabs: Vec<TabState>,
     active: usize,
+    #[serde(default)]
+    folder: Option<PathBuf>,
 }
 
 /// Every window's tabs, unsaved text included, saved as they change so the
@@ -472,12 +616,7 @@ impl Doc {
     }
 
     fn is_markdown(&self) -> bool {
-        self.path
-            .as_deref()
-            .and_then(Path::extension)
-            .is_some_and(|ext| {
-                ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown")
-            })
+        self.path.as_deref().is_some_and(is_markdown)
     }
 
     fn is_blank(&self, cx: &App) -> bool {
@@ -504,6 +643,8 @@ struct Notepad {
     slash_selected: usize,
     /// The `/` whose menu Escape closed, so typing on doesn't reopen it.
     slash_dismissed: Option<usize>,
+    folder: Option<NotesFolder>,
+    sidebar: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -526,6 +667,12 @@ impl Notepad {
             }),
             // Only matters while the theme is "Use system setting".
             cx.observe_window_appearance(window, |_, _, cx| apply_appearance(cx)),
+            // Coming back to the window picks up notes changed elsewhere.
+            cx.observe_window_activation(window, |this, window, cx| {
+                if window.is_window_active() {
+                    this.rescan(cx);
+                }
+            }),
         ];
 
         let this = cx.entity().downgrade();
@@ -544,9 +691,19 @@ impl Notepad {
             prompting: false,
             slash_selected: 0,
             slash_dismissed: None,
+            folder: None,
+            sidebar: true,
             _subscriptions: subscriptions,
         };
         notepad.add_tab(window, cx);
+        let folder = cx
+            .global::<Settings>()
+            .folder
+            .clone()
+            .or_else(default_folder);
+        if let Some(dir) = folder.filter(|d| std::fs::create_dir_all(d).is_ok()) {
+            notepad.set_folder(dir, cx);
+        }
         notepad.open_paths(paths, window, cx);
         notepad
     }
@@ -559,11 +716,15 @@ impl Notepad {
         WindowState {
             tabs: tabs.collect(),
             active: self.active,
+            folder: self.folder.as_ref().map(|v| v.dir.clone()),
         }
     }
 
     /// Rebuilds a saved window over the blank tab `new` starts with.
     fn restore(&mut self, state: WindowState, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(dir) = state.folder.filter(|d| d.is_dir()) {
+            self.set_folder(dir, cx);
+        }
         let mut first = true;
         for tab in state.tabs {
             // A clean tab whose file is gone is dropped; one with unsaved text
@@ -668,6 +829,11 @@ impl Notepad {
     /// switching to a tab that already has the file.
     fn open_paths(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         for path in paths {
+            // A dropped (or command-line) folder becomes the notes folder.
+            if path.is_dir() {
+                self.set_folder(path, cx);
+                continue;
+            }
             if let Some(ix) = self
                 .docs
                 .iter()
@@ -749,6 +915,7 @@ impl Notepad {
         if !was_markdown && doc.is_markdown() {
             doc.preview = true;
         }
+        self.rescan(cx);
         self.update_title(window);
         cx.notify();
         true
@@ -1015,6 +1182,343 @@ impl Notepad {
     fn previous_tab(&mut self, _: &PreviousTab, window: &mut Window, cx: &mut Context<Self>) {
         let len = self.docs.len();
         self.activate((self.active + len - 1) % len, window, cx);
+    }
+
+    // ---- Notes folder ----
+
+    fn open_folder(&mut self, _: &OpenFolder, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open Folder".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Some(dir) = picked.await??.and_then(|paths| paths.into_iter().next()) {
+                this.update(cx, |this, cx| this.set_folder(dir, cx))?;
+            }
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn set_folder(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        let tree = cx.new(|cx| TreeState::new(cx));
+        let subscription = cx.subscribe(&tree, |this, _, event: &TreeEvent, _| {
+            if let Some(folder) = &mut this.folder {
+                match event {
+                    TreeEvent::Collapsed(id) => folder.collapsed.insert(id.clone()),
+                    TreeEvent::Expanded(id) => folder.collapsed.remove(id),
+                };
+            }
+        });
+        self.folder = Some(NotesFolder {
+            dir,
+            tree,
+            collapsed: HashSet::new(),
+            notes: Vec::new(),
+            _subscription: subscription,
+        });
+        self.sidebar = true;
+        self.rescan(cx);
+        let dir = self.folder.as_ref().map(|v| v.dir.clone());
+        let settings = cx.global::<Settings>();
+        if settings.folder != dir || settings.folders.first() != dir.as_ref() {
+            cx.update_global::<Settings, _>(|s, _| {
+                s.folders.retain(|d| Some(d) != dir.as_ref());
+                s.folders.extend(dir.clone());
+                s.folders.rotate_right(1);
+                s.folders.truncate(MAX_RECENT);
+                s.folder = dir;
+            });
+        }
+    }
+
+    /// Re-reads the notes folder's files and links.
+    // ponytail: reads every note on each rescan (open, save, window focus); keep a
+    // per-file index keyed by mtime if big folders lag.
+    fn rescan(&mut self, cx: &mut Context<Self>) {
+        let Some(folder) = &mut self.folder else {
+            return;
+        };
+        let mut paths = Vec::new();
+        let items = walk_folder(&folder.dir, &folder.collapsed, &mut paths);
+        folder.notes = paths
+            .into_iter()
+            .map(|path| {
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                let links = wiki_links(&text)
+                    .iter()
+                    .map(|l| l.1.to_lowercase())
+                    .collect();
+                (path, links)
+            })
+            .collect();
+        folder.tree.update(cx, |tree, cx| tree.set_items(items, cx));
+        cx.notify();
+    }
+
+    /// Where a link points: an absolute path, a file beside the open note, a note in
+    /// the notes folder by name or path, or else a new note to create (in the notes folder, or beside the open note).
+    fn resolve_note(&self, target: &str) -> Option<PathBuf> {
+        let target = target.split('#').next()?.trim();
+        if target.is_empty() {
+            return None;
+        }
+        if Path::new(target).is_absolute() {
+            return Some(target.into());
+        }
+        let here = self.doc().path.as_deref().and_then(Path::parent);
+        if let Some(path) = here.map(|dir| dir.join(target)).filter(|p| p.is_file()) {
+            return Some(path);
+        }
+        let file = if Path::new(target).extension().is_some() {
+            target.to_string()
+        } else {
+            format!("{target}.md")
+        };
+        let Some(folder) = &self.folder else {
+            return here.map(|dir| dir.join(file));
+        };
+        let name = target.trim_end_matches(".md").to_lowercase();
+        let found = folder
+            .notes
+            .iter()
+            .find(|(p, _)| links_to(&name, p, &folder.dir));
+        Some(found.map_or_else(|| folder.dir.join(file), |(p, _)| p.clone()))
+    }
+
+    /// Opens the note a link or sidebar row points at, creating it if it's new.
+    fn open_note(&mut self, action: &OpenNote, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.resolve_note(&action.0) else {
+            return;
+        };
+        if !path.exists() {
+            let created = path
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|_| std::fs::write(&path, ""));
+            if let Err(err) = created {
+                let message = format!("Cannot create {}", path.display());
+                return self.alert(&message, &err.to_string(), window, cx);
+            }
+            self.rescan(cx);
+        }
+        self.open_paths(vec![path], window, cx);
+    }
+
+    /// With a notes folder open, asks for a name and opens that note (new or existing); else a new tab.
+    fn new_note(&mut self, _: &NewNote, window: &mut Window, cx: &mut Context<Self>) {
+        if self.folder.is_none() {
+            self.add_tab(window, cx);
+            return;
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Untitled"));
+        let this = cx.entity().downgrade();
+        window.open_dialog(cx, {
+            let input = input.clone();
+            move |dialog, _, _| {
+                let (input, this) = (input.clone(), this.clone());
+                dialog
+                    .title("New Note")
+                    .w(px(320.))
+                    .child(v_flex().gap_2().child("Name:").child(Input::new(&input)))
+                    .footer(
+                        DialogFooter::new()
+                            .gap_2()
+                            .child(
+                                DialogClose::new()
+                                    .child(Button::new("cancel").label("Cancel").outline()),
+                            )
+                            .child(
+                                DialogAction::new()
+                                    .child(Button::new("ok").label("Create").primary()),
+                            ),
+                    )
+                    .on_ok(move |_, window, cx| {
+                        let name = input.read(cx).value().trim().to_string();
+                        let name = if name.is_empty() {
+                            "Untitled".into()
+                        } else {
+                            name
+                        };
+                        this.update(cx, |this, cx| {
+                            this.open_note(&OpenNote(name.into()), window, cx)
+                        })
+                        .is_ok()
+                    })
+            }
+        });
+        input.update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    /// Notes whose `[[links]]` point at the active note.
+    fn backlinks(&self) -> Vec<&Path> {
+        let (Some(folder), Some(path)) = (&self.folder, &self.doc().path) else {
+            return Vec::new();
+        };
+        folder
+            .notes
+            .iter()
+            .filter(|(note, links)| {
+                note != path && links.iter().any(|l| links_to(l, path, &folder.dir))
+            })
+            .map(|(note, _)| note.as_path())
+            .collect()
+    }
+
+    /// The folder's name; its menu switches folders and shows where the notes live.
+    fn render_folder_menu(
+        &self,
+        folder: &NotesFolder,
+        name: String,
+        cx: &App,
+    ) -> impl IntoElement + use<> {
+        let action_context = self.editor().read(cx).focus_handle(cx);
+        let current = folder.dir.clone();
+        // The default folder always stays one click away.
+        let mut folders = cx.global::<Settings>().folders.clone();
+        folders.extend(default_folder().filter(|d| !folders.contains(d)));
+        folders.retain(|d| d.is_dir());
+        Button::new("folder-menu")
+            .ghost()
+            .small()
+            .min_w_0()
+            .label(name)
+            .dropdown_caret(true)
+            .tooltip(current.display().to_string())
+            .dropdown_menu(move |popup, _, _| {
+                let popup = folders.iter().fold(
+                    popup.action_context(action_context.clone()),
+                    |popup, dir| {
+                        popup.menu_with_check(
+                            recent_label(dir),
+                            *dir == current,
+                            Box::new(SwitchFolder(dir.clone())),
+                        )
+                    },
+                );
+                popup
+                    .separator()
+                    .menu("Open Folder…", Box::new(OpenFolder))
+                    .menu("Reveal in Finder", Box::new(RevealFolder))
+            })
+    }
+
+    /// The sidebar's header (folder name, New Note) and body (notes, backlinks).
+    // ponytail: fixed width; make it a resizable panel if people ask.
+    fn render_sidebar(&self, folder: &NotesFolder, cx: &mut Context<Self>) -> (Div, Div) {
+        let theme = cx.theme();
+        let row = |id: (&'static str, usize), path: &Path| {
+            let target: SharedString = path.to_string_lossy().into_owned().into();
+            ListItem::new(id)
+                .px_3()
+                .text_sm()
+                .child(
+                    path.file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+                .on_click(move |_, window, cx| {
+                    window.dispatch_action(Box::new(OpenNote(target.clone())), cx)
+                })
+        };
+        let backlinks: Vec<_> = self
+            .backlinks()
+            .into_iter()
+            .enumerate()
+            .map(|(ix, path)| row(("backlink", ix), path))
+            .collect();
+        let name = folder
+            .dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let header = h_flex()
+            .flex_none()
+            .w(px(240.))
+            .pl_1p5()
+            .pr_1p5()
+            .justify_between()
+            .bg(theme.tab_bar)
+            .border_b_1()
+            .border_r_1()
+            .border_color(theme.border)
+            .child(self.render_folder_menu(folder, name, cx))
+            .child(
+                Button::new("new-note")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Plus)
+                    .tooltip("New note")
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.new_note(&NewNote, window, cx)),
+                    ),
+            );
+        let body = v_flex()
+            .flex_none()
+            .w(px(240.))
+            .bg(theme.secondary)
+            .border_r_1()
+            .border_color(theme.border)
+            .when(folder.notes.is_empty(), |this| {
+                this.child(
+                    div()
+                        .p_3()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child("No notes yet. Press ⌘N to create one."),
+                )
+            })
+            .child(div().flex_1().min_h_0().py_1().child(tree(
+                &folder.tree,
+                |ix, entry, _, _, _| {
+                    let item = entry.item();
+                    let icon = match (entry.is_folder(), entry.is_expanded()) {
+                        (true, true) => IconName::FolderOpen,
+                        (true, false) => IconName::FolderClosed,
+                        _ => IconName::FileText,
+                    };
+                    let row = ListItem::new(ix)
+                        .pl(px(10. + 14. * entry.depth() as f32))
+                        .text_sm()
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(Icon::new(icon).small())
+                                .child(item.label.clone()),
+                        );
+                    if entry.is_folder() {
+                        return row;
+                    }
+                    let path = item.id.clone();
+                    row.on_click(move |_, window, cx| {
+                        window.dispatch_action(Box::new(OpenNote(path.clone())), cx)
+                    })
+                },
+            )))
+            .when(!backlinks.is_empty(), |this| {
+                this.child(
+                    v_flex()
+                        .flex_none()
+                        .max_h(px(200.))
+                        .py_1()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .child(
+                            div()
+                                .px_3()
+                                .py_1()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(format!("BACKLINKS · {}", backlinks.len())),
+                        )
+                        .children(backlinks),
+                )
+            });
+        (header, body)
     }
 
     // ---- Edit menu ----
@@ -1378,8 +1882,17 @@ impl Render for Notepad {
             let theme = cx.theme();
             TextView::markdown(
                 ("preview", doc.id().as_u64() as usize),
-                editor.read(cx).value(),
+                wikify(&editor.read(cx).value()),
             )
+            // Web links open in the browser; `[[links]]` and relative ones open as notes.
+            .on_link_click(|url, _, window, cx| {
+                if url.contains("://") || url.starts_with("mailto:") {
+                    cx.open_url(url);
+                } else {
+                    let target = url.strip_prefix("wiki:").unwrap_or(url);
+                    window.dispatch_action(Box::new(OpenNote(target.to_string().into())), cx);
+                }
+            })
             .font_family(settings.font_family.clone())
             .text_size(px(font_px))
             // Inline code defaults to the blue `accent` (it tints links in tables), and
@@ -1420,6 +1933,13 @@ impl Render for Notepad {
         });
         let tabs = self.render_tabs(cx);
         let menu_bar = self.render_menu_bar(cx);
+        let (sidebar_header, sidebar) = match self.folder.as_ref().filter(|_| self.sidebar) {
+            Some(folder) => {
+                let (header, body) = self.render_sidebar(folder, cx);
+                (Some(header), Some(body))
+            }
+            None => (None, None),
+        };
         let theme = cx.theme();
 
         v_flex()
@@ -1436,6 +1956,21 @@ impl Render for Notepad {
             .on_action(cx.listener(Self::save))
             .on_action(cx.listener(Self::save_as))
             .on_action(cx.listener(Self::export))
+            .on_action(cx.listener(Self::open_folder))
+            .on_action(cx.listener(Self::new_note))
+            .on_action(cx.listener(Self::open_note))
+            .on_action(cx.listener(|this, action: &SwitchFolder, _, cx| {
+                this.set_folder(action.0.clone(), cx)
+            }))
+            .on_action(cx.listener(|this, _: &RevealFolder, _, cx| {
+                if let Some(folder) = &this.folder {
+                    cx.reveal_path(&folder.dir);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
+                this.sidebar ^= true;
+                cx.notify();
+            }))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::close_window))
             .on_action(cx.listener(Self::next_tab))
@@ -1447,8 +1982,14 @@ impl Render for Notepad {
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom_by(10, cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom_by(-10, cx)))
             .on_action(cx.listener(|this, _: &ZoomReset, _, cx| this.zoom_by(0, cx)))
-            .child(div().flex_none().child(tabs))
-            .child(menu_bar)
+            // The sidebar's header shares the tab row, so the two always line up.
+            .child(
+                h_flex()
+                    .flex_none()
+                    .items_stretch()
+                    .children(sidebar_header)
+                    .child(div().flex_1().min_w_0().child(tabs)),
+            )
             // Capture phase, so the open `/` menu sees these keys before the text area.
             .capture_action(cx.listener(|this, _: &input::MoveUp, window, cx| {
                 this.slash_key(SlashKey::Up, window, cx)
@@ -1466,56 +2007,74 @@ impl Render for Notepad {
                 this.slash_key(SlashKey::Dismiss, window, cx)
             }))
             .children(slash_menu)
-            .child(h_flex().flex_1().min_h_0().items_stretch().map(|this| {
-                let textarea = Textarea::new(&editor)
-                    .appearance(false)
+            .child(
+                h_flex()
                     .flex_1()
                     .min_h_0()
-                    .h_full()
-                    .font_family(settings.font_family.clone())
-                    // Show exactly what was typed: no `->` → `→` ligatures.
-                    .font_features(FontFeatures::disable_ligatures())
-                    .text_size(px(font_px))
-                    // The kit fixes this at 1.25rem; follow the font (and zoom) instead.
-                    .line_height(px((font_px * LINE_SPACING).round()));
-                match preview {
-                    None => this.child(textarea),
-                    // Split keyed per tab, so each tab keeps its own divider position.
-                    Some(preview) => this.child(
-                        h_resizable(split_id)
-                            .with_handle_appearance(divider)
-                            .child(resizable_panel().child(textarea))
-                            // No `pr_*`: the scrollbar is painted inset to the
-                            // panel's own bounds, so right padding here would
-                            // pull it away from the window edge.
-                            .child(resizable_panel().pl_4().py_2().child(preview.size_full())),
+                    .items_stretch()
+                    .children(sidebar)
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(menu_bar)
+                            .child(h_flex().flex_1().min_h_0().items_stretch().map(|this| {
+                                let textarea = Textarea::new(&editor)
+                                    .appearance(false)
+                                    .flex_1()
+                                    .min_h_0()
+                                    .h_full()
+                                    .font_family(settings.font_family.clone())
+                                    // Show exactly what was typed: no `->` → `→` ligatures.
+                                    .font_features(FontFeatures::disable_ligatures())
+                                    .text_size(px(font_px))
+                                    // The kit fixes this at 1.25rem; follow the font (and zoom) instead.
+                                    .line_height(px((font_px * LINE_SPACING).round()));
+                                match preview {
+                                    None => this.child(textarea),
+                                    // Split keyed per tab, so each tab keeps its own divider position.
+                                    Some(preview) => this.child(
+                                        h_resizable(split_id)
+                                            .with_handle_appearance(divider)
+                                            .child(resizable_panel().child(textarea))
+                                            // No `pr_*`: the scrollbar is painted inset to the
+                                            // panel's own bounds, so right padding here would
+                                            // pull it away from the window edge.
+                                            .child(
+                                                resizable_panel()
+                                                    .pl_4()
+                                                    .py_2()
+                                                    .child(preview.size_full()),
+                                            ),
+                                    ),
+                                }
+                            }))
+                            .when(settings.status_bar, |this| {
+                                this.child(
+                                    h_flex()
+                                        .h(px(28.))
+                                        .flex_none()
+                                        .text_size(px(12.))
+                                        .text_color(theme.muted_foreground)
+                                        .bg(theme.secondary)
+                                        .border_t_1()
+                                        .border_color(theme.border)
+                                        .child(div().flex_1().px_3().child(format!(
+                                            "Ln {}, Col {}",
+                                            pos.line + 1,
+                                            pos.character + 1
+                                        )))
+                                        .children(status.map(|text| {
+                                            div()
+                                                .px_3()
+                                                .border_l_1()
+                                                .border_color(theme.border)
+                                                .child(text)
+                                        })),
+                                )
+                            }),
                     ),
-                }
-            }))
-            .when(settings.status_bar, |this| {
-                this.child(
-                    h_flex()
-                        .h(px(28.))
-                        .flex_none()
-                        .text_size(px(12.))
-                        .text_color(theme.muted_foreground)
-                        .bg(theme.secondary)
-                        .border_t_1()
-                        .border_color(theme.border)
-                        .child(div().flex_1().px_3().child(format!(
-                            "Ln {}, Col {}",
-                            pos.line + 1,
-                            pos.character + 1
-                        )))
-                        .children(status.map(|text| {
-                            div()
-                                .px_3()
-                                .border_l_1()
-                                .border_color(theme.border)
-                                .child(text)
-                        })),
-                )
-            })
+            )
             // gpui-kit 0.6 leaves drawing the overlay layers to the app view.
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
@@ -1542,7 +2101,9 @@ fn menus(settings: &Settings, native: bool) -> Vec<Menu> {
             [
                 MenuItem::action("New Tab", NewTab),
                 MenuItem::action("New Window", NewWindow),
+                MenuItem::action("New Note", NewNote),
                 MenuItem::action("Open…", Open),
+                MenuItem::action("Open Folder…", OpenFolder),
                 MenuItem::submenu(
                     Menu::new("Open Recent").items(
                         settings
@@ -1612,6 +2173,7 @@ fn menus(settings: &Settings, native: bool) -> Vec<Menu> {
                 MenuItem::action("Restore Default Zoom", ZoomReset),
             ])),
             MenuItem::action("Status Bar", ToggleStatusBar).checked(settings.status_bar),
+            MenuItem::action("Sidebar", ToggleSidebar),
             MenuItem::separator(),
             MenuItem::action("Next Tab", NextTab),
             MenuItem::action("Previous Tab", PreviousTab),
@@ -1691,10 +2253,12 @@ fn bind_keys(cx: &mut App) {
     // `secondary` is Cmd on macOS and Ctrl elsewhere. Cut/Copy/Paste/Undo/Redo/
     // Select All/Find come built into the text area.
     cx.bind_keys([
-        KeyBinding::new("secondary-n", NewTab, None),
+        KeyBinding::new("secondary-n", NewNote, None),
         KeyBinding::new("secondary-t", NewTab, None),
         KeyBinding::new("secondary-shift-n", NewWindow, None),
         KeyBinding::new("secondary-o", Open, None),
+        KeyBinding::new("secondary-shift-o", OpenFolder, None),
+        KeyBinding::new("secondary-\\", ToggleSidebar, None),
         KeyBinding::new("secondary-s", Save, None),
         KeyBinding::new("secondary-shift-s", SaveAs, None),
         KeyBinding::new("secondary-w", CloseTab, None),
@@ -1884,6 +2448,7 @@ fn init(cx: &mut App) {
     // File commands no editor window picked up (none is open, or Settings has
     // focus) open a window of their own.
     cx.on_action(|_: &NewTab, cx| open_window(Vec::new(), cx));
+    cx.on_action(|_: &NewNote, cx| open_window(Vec::new(), cx));
     cx.on_action(|_: &Open, cx| {
         let picked = cx.prompt_for_paths(OPEN_FILES);
         cx.spawn(async move |cx| {
@@ -2878,6 +3443,73 @@ mod ui_tests {
         assert_eq!(slash_matches("List").len(), 3);
     }
 
+    #[test]
+    fn wiki_links_parse_and_render() {
+        use super::{wiki_links, wikify};
+        let text = "see [[Note]], [[dir/Other#Top|that one]] and ![[pic.png]] not [[]] [[a\nb]]";
+        let targets: Vec<_> = wiki_links(text).iter().map(|l| (l.1, l.2)).collect();
+        assert_eq!(
+            targets,
+            [
+                ("Note", "Note"),
+                ("dir/Other", "that one"),
+                ("pic.png", "pic.png")
+            ]
+        );
+        assert_eq!(
+            wikify("a [[My Note|it]] ![[x]] b"),
+            "a [it](<wiki:My Note>) [x](<wiki:x>) b"
+        );
+        assert_eq!(wikify("no links"), "no links");
+    }
+
+    #[gpui_kit::test]
+    fn folder_links_resolve_create_and_backlink(cx: &mut TestAppContext) {
+        use super::OpenNote;
+        let (handle, notepad) = open(cx);
+        let dir = std::env::temp_dir().join(format!("notey-folder-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::create_dir_all(dir.join(".obsidian")).unwrap();
+        std::fs::write(dir.join("Home.md"), "go to [[target]] and [[Fresh]]").unwrap();
+        std::fs::write(dir.join("sub/Target.md"), "# T").unwrap();
+        std::fs::write(dir.join(".obsidian/Hidden.md"), "[[target]]").unwrap();
+        let open_note = |cx: &mut TestAppContext, target: &str| {
+            let action = OpenNote(target.to_string().into());
+            cx.update_window(handle, |_, window, cx| {
+                notepad.update(cx, |this, cx| {
+                    if this.folder.is_none() {
+                        this.set_folder(dir.clone(), cx);
+                    }
+                    this.open_note(&action, window, cx)
+                })
+            })
+            .unwrap();
+        };
+        // By name, case-insensitively, from another folder; dot-folders don't count.
+        open_note(cx, "target");
+        cx.read(|cx| {
+            let this = notepad.read(cx);
+            assert_eq!(
+                this.doc().path.as_deref(),
+                Some(dir.join("sub/Target.md").as_path())
+            );
+            assert_eq!(this.backlinks(), [dir.join("Home.md").as_path()]);
+            assert_eq!(this.folder.as_ref().unwrap().notes.len(), 2);
+            // Remembered for new windows and the header's folder menu.
+            let settings = cx.global::<super::Settings>();
+            assert_eq!(
+                (settings.folder.as_ref(), settings.folders.first()),
+                (Some(&dir), Some(&dir))
+            );
+        });
+        // A link to a missing note creates it at the top of the notes folder.
+        open_note(cx, "Fresh");
+        assert!(dir.join("Fresh.md").is_file());
+        cx.read(|cx| assert_eq!(notepad.read(cx).folder.as_ref().unwrap().notes.len(), 3));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[gpui_kit::test]
     fn slash_menu_inserts_markdown(cx: &mut TestAppContext) {
         let (handle, notepad) = open(cx);
@@ -2940,6 +3572,7 @@ mod ui_tests {
                 tab(Some(&file.with_extension("new")), Some("edited")),
             ],
             active: 1,
+            folder: None,
         };
         let json = serde_json::to_string(&saved).unwrap();
         cx.update_window(handle, |_, window, cx| {
