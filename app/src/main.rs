@@ -335,6 +335,20 @@ fn support_dir() -> Option<PathBuf> {
     Some(std::env::home_dir()?.join("Library/Application Support/Notey"))
 }
 
+/// Makes `dir` the notes folder new windows open, first in the sidebar header's menu.
+fn remember_folder(dir: PathBuf, cx: &mut App) {
+    let settings = cx.global::<Settings>();
+    if settings.folder.as_ref() == Some(&dir) && settings.folders.first() == Some(&dir) {
+        return;
+    }
+    cx.update_global::<Settings, _>(|s, _| {
+        s.folders.retain(|d| *d != dir);
+        s.folders.insert(0, dir.clone());
+        s.folders.truncate(MAX_RECENT);
+        s.folder = Some(dir);
+    });
+}
+
 /// The notes folder until another is opened; none in tests.
 fn default_folder() -> Option<PathBuf> {
     if cfg!(test) {
@@ -1224,16 +1238,8 @@ impl Notepad {
         });
         self.sidebar = true;
         self.rescan(cx);
-        let dir = self.folder.as_ref().map(|v| v.dir.clone());
-        let settings = cx.global::<Settings>();
-        if settings.folder != dir || settings.folders.first() != dir.as_ref() {
-            cx.update_global::<Settings, _>(|s, _| {
-                s.folders.retain(|d| Some(d) != dir.as_ref());
-                s.folders.extend(dir.clone());
-                s.folders.rotate_right(1);
-                s.folders.truncate(MAX_RECENT);
-                s.folder = dir;
-            });
+        if let Some(folder) = &self.folder {
+            remember_folder(folder.dir.clone(), cx);
         }
     }
 
@@ -2606,13 +2612,7 @@ fn open_single<V: Render>(
 }
 
 fn open_settings(cx: &mut App) {
-    open_single(
-        "Settings",
-        size(px(560.), px(640.)),
-        true,
-        SettingsView::new,
-        cx,
-    );
+    open_single("Settings", SETTINGS_SIZE, true, SettingsView::new, cx);
 }
 
 fn open_about(cx: &mut App) {
@@ -2690,10 +2690,16 @@ impl Render for AboutView {
     }
 }
 
-const SETTINGS_TABS: [&str; 2] = ["General", "Appearance"];
+/// Settings pages, listed in the window's sidebar.
+const SETTINGS_PAGES: [(&str, IconName); 3] = [
+    ("Editor", IconName::ALargeSmall),
+    ("Notes", IconName::FolderOpen),
+    ("Appearance", IconName::Palette),
+];
+const SETTINGS_SIZE: Size<Pixels> = size(px(720.), px(540.));
 
 struct SettingsView {
-    /// Index into `SETTINGS_TABS`.
+    /// Index into `SETTINGS_PAGES`.
     tab: usize,
     font_family: Entity<SelectState<SearchableVec<String>>>,
     font_size: Entity<SelectState<Vec<String>>>,
@@ -2776,13 +2782,13 @@ impl SettingsView {
 /// One settings row: title and hint on the left, control on the right.
 fn setting_row(
     title: &'static str,
-    hint: &'static str,
+    hint: impl Into<SharedString>,
     control: impl IntoElement,
     cx: &App,
 ) -> Div {
     let theme = cx.theme();
     h_flex()
-        .gap_4()
+        .gap_6()
         .px_4()
         .py_3()
         .child(
@@ -2790,32 +2796,33 @@ fn setting_row(
                 .flex_1()
                 .min_w_0()
                 .gap_0p5()
-                .child(div().truncate().child(title))
+                .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
                 .child(
                     div()
-                        .truncate()
-                        .text_sm()
+                        .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child(hint),
+                        .child(hint.into()),
                 ),
         )
         .child(div().flex_none().child(control))
 }
 
-/// A titled group of settings rows in one card, divided by hairlines.
-fn setting_section(title: &'static str, rows: Vec<Div>, cx: &App) -> impl IntoElement {
+/// A small heading over a group of settings.
+fn section_title(title: &'static str, cx: &App) -> Div {
+    div()
+        .text_sm()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(cx.theme().muted_foreground)
+        .child(title)
+}
+
+/// A group of settings rows in one card, divided by hairlines, under an optional title.
+fn setting_section(title: Option<&'static str>, rows: Vec<Div>, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     let n = rows.len();
     v_flex()
         .gap_2()
-        .child(
-            div()
-                .pl_1()
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.muted_foreground)
-                .child(title),
-        )
+        .children(title.map(|t| section_title(t, cx)))
         .child(
             v_flex()
                 .overflow_hidden()
@@ -2926,206 +2933,274 @@ fn set_toggle(update: fn(&mut Settings, bool)) -> impl Fn(&bool, &mut Window, &m
     }
 }
 
+impl SettingsView {
+    fn editor_page(&self, settings: &Settings, cx: &App) -> Vec<AnyElement> {
+        vec![
+            setting_section(
+                None,
+                vec![
+                    setting_row(
+                        "Font",
+                        "Family and size",
+                        h_flex()
+                            .gap_2()
+                            .child(div().w(px(160.)).child(Select::new(&self.font_family)))
+                            .child(div().w(px(72.)).child(Select::new(&self.font_size))),
+                        cx,
+                    ),
+                    setting_row(
+                        "Word wrap",
+                        "Fit text within the window by default",
+                        Switch::new("word-wrap")
+                            .checked(settings.word_wrap)
+                            .on_change(set_toggle(|s, on| s.word_wrap = on)),
+                        cx,
+                    ),
+                    setting_row(
+                        "Status bar",
+                        "Show line, column, zoom and encoding",
+                        Switch::new("status-bar")
+                            .checked(settings.status_bar)
+                            .on_change(set_toggle(|s, on| s.status_bar = on)),
+                        cx,
+                    ),
+                ],
+                cx,
+            )
+            .into_any_element(),
+        ]
+    }
+
+    fn notes_page(settings: &Settings, cx: &App) -> Vec<AnyElement> {
+        let folder = settings.folder.clone().or_else(default_folder);
+        let path = folder.as_deref().map_or("None yet".into(), |dir| {
+            recent_label(dir).replacen(" — ", " in ", 1)
+        });
+        vec![
+            setting_section(
+                None,
+                vec![
+                    setting_row(
+                        "Notes folder",
+                        format!("New windows open {path}"),
+                        h_flex()
+                            .gap_2()
+                            .when_some(folder, |this, dir| {
+                                this.child(
+                                    Button::new("reveal-folder")
+                                        .outline()
+                                        .small()
+                                        .label("Reveal")
+                                        .on_click(move |_, _, cx| cx.reveal_path(&dir)),
+                                )
+                            })
+                            .child(
+                                Button::new("change-folder")
+                                    .outline()
+                                    .small()
+                                    .label("Change…")
+                                    .on_click(|_, _, cx| {
+                                        let picked = cx.prompt_for_paths(PathPromptOptions {
+                                            files: false,
+                                            directories: true,
+                                            multiple: false,
+                                            prompt: Some("Use Folder".into()),
+                                        });
+                                        cx.spawn(async move |cx| {
+                                            if let Ok(Ok(Some(paths))) = picked.await
+                                                && let Some(dir) = paths.into_iter().next()
+                                            {
+                                                cx.update(|cx| remember_folder(dir, cx));
+                                            }
+                                        })
+                                        .detach();
+                                    }),
+                            ),
+                        cx,
+                    ),
+                    setting_row(
+                        "Markdown preview",
+                        "Open .md files with the preview beside them",
+                        Switch::new("preview")
+                            .checked(settings.preview)
+                            .on_change(set_toggle(|s, on| s.preview = on)),
+                        cx,
+                    ),
+                ],
+                cx,
+            )
+            .into_any_element(),
+        ]
+    }
+
+    fn appearance_page(settings: &Settings, cx: &App) -> Vec<AnyElement> {
+        let theme_ix = Appearance::ALL
+            .iter()
+            .position(|&a| a == settings.appearance);
+        // One grid of cards per mode.
+        let cards = |mode: ThemeMode, cx: &App| {
+            let chosen = settings.theme(mode).clone();
+            v_flex()
+                .gap_3()
+                .child(section_title(
+                    if mode.is_dark() {
+                        "Dark theme"
+                    } else {
+                        "Light theme"
+                    },
+                    cx,
+                ))
+                .child(div().flex().flex_wrap().gap_3().children(
+                    themes_for(mode, cx).into_iter().map(|t| {
+                        let name = t.name.clone();
+                        theme_card(&t, name == chosen, cx).on_click(move |_, _, cx| {
+                            let name = name.clone();
+                            cx.update_global::<Settings, _>(|s, _| match mode {
+                                ThemeMode::Dark => s.dark_theme = name,
+                                ThemeMode::Light => s.light_theme = name,
+                            });
+                            apply_appearance(cx);
+                        })
+                    }),
+                ))
+                .into_any_element()
+        };
+        vec![
+            setting_section(
+                None,
+                vec![
+                    setting_row(
+                        "Mode",
+                        "System follows macOS",
+                        ButtonGroup::new("appearance")
+                            .outline()
+                            .small()
+                            .children(Appearance::ALL.iter().enumerate().map(|(ix, a)| {
+                                Button::new(ix)
+                                    .label(a.label())
+                                    .selected(theme_ix == Some(ix))
+                            }))
+                            .on_click(|clicked, _, cx| {
+                                let Some(&ix) = clicked.first() else { return };
+                                let appearance = Appearance::ALL[ix];
+                                cx.update_global::<Settings, _>(|s, _| s.appearance = appearance);
+                                apply_appearance(cx);
+                            }),
+                        cx,
+                    ),
+                    setting_row(
+                        "Custom themes",
+                        "JSON theme files in this folder apply as you save them",
+                        Button::new("themes-folder")
+                            .outline()
+                            .small()
+                            .label("Open Folder")
+                            .on_click(|_, _, cx| {
+                                let Some(dir) = themes_dir() else { return };
+                                let _ = std::fs::create_dir_all(&dir);
+                                // With no theme of their own yet, start them off with one to edit.
+                                let has_theme =
+                                    std::fs::read_dir(&dir).into_iter().flatten().any(|e| {
+                                        e.is_ok_and(|e| {
+                                            e.path().extension().is_some_and(|x| x == "json")
+                                        })
+                                    });
+                                if !has_theme {
+                                    let _ = std::fs::write(
+                                        dir.join("my-theme.json"),
+                                        example_theme(cx),
+                                    );
+                                }
+                                cx.open_with_system(&dir);
+                            }),
+                        cx,
+                    ),
+                ],
+                cx,
+            )
+            .into_any_element(),
+            cards(ThemeMode::Light, cx),
+            cards(ThemeMode::Dark, cx),
+        ]
+    }
+}
+
 impl Render for SettingsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let settings = cx.global::<Settings>().clone();
         let theme = cx.theme().clone();
-
         let body = match self.tab {
-            0 => vec![
-                setting_section(
-                    "EDITOR",
-                    vec![
-                        setting_row(
-                            "Font",
-                            "Family and size of the text",
-                            h_flex()
-                                .gap_2()
-                                .child(div().w(px(180.)).child(Select::new(&self.font_family)))
-                                .child(div().w(px(76.)).child(Select::new(&self.font_size))),
-                            cx,
-                        ),
-                        setting_row(
-                            "Word wrap",
-                            "Fit text within the window by default",
-                            Switch::new("word-wrap")
-                                .checked(settings.word_wrap)
-                                .on_change(set_toggle(|s, on| s.word_wrap = on)),
-                            cx,
-                        ),
-                        setting_row(
-                            "Status bar",
-                            "Show line, column, zoom and encoding",
-                            Switch::new("status-bar")
-                                .checked(settings.status_bar)
-                                .on_change(set_toggle(|s, on| s.status_bar = on)),
-                            cx,
-                        ),
-                        setting_row(
-                            "Markdown preview",
-                            "Open .md files with the preview beside them",
-                            Switch::new("preview")
-                                .checked(settings.preview)
-                                .on_change(set_toggle(|s, on| s.preview = on)),
-                            cx,
-                        ),
-                    ],
-                    cx,
-                )
-                .into_any_element(),
-            ],
-            _ => {
-                let theme_ix = Appearance::ALL
-                    .iter()
-                    .position(|&a| a == settings.appearance);
-                // One grid of cards per mode.
-                let cards = |mode: ThemeMode, cx: &App| {
-                    let chosen = settings.theme(mode).clone();
-                    div().p_4().flex().flex_wrap().gap_3().children(
-                        themes_for(mode, cx).into_iter().map(|t| {
-                            let name = t.name.clone();
-                            theme_card(&t, name == chosen, cx).on_click(move |_, _, cx| {
-                                let name = name.clone();
-                                cx.update_global::<Settings, _>(|s, _| match mode {
-                                    ThemeMode::Dark => s.dark_theme = name,
-                                    ThemeMode::Light => s.light_theme = name,
-                                });
-                                apply_appearance(cx);
-                            })
-                        }),
-                    )
-                };
-                vec![
-                    setting_section(
-                        "APPEARANCE",
-                        vec![
-                            setting_row(
-                                "App theme",
-                                "Light or dark mode; System follows macOS",
-                                ButtonGroup::new("appearance")
-                                    .outline()
-                                    .small()
-                                    .children(Appearance::ALL.iter().enumerate().map(|(ix, a)| {
-                                        Button::new(ix)
-                                            .label(a.label())
-                                            .selected(theme_ix == Some(ix))
-                                    }))
-                                    .on_click(|clicked, _, cx| {
-                                        let Some(&ix) = clicked.first() else { return };
-                                        let appearance = Appearance::ALL[ix];
-                                        cx.update_global::<Settings, _>(|s, _| {
-                                            s.appearance = appearance
-                                        });
-                                        apply_appearance(cx);
-                                    }),
-                                cx,
-                            ),
-                            setting_row(
-                                "Custom themes",
-                                "JSON theme files here apply as you save them",
-                                Button::new("themes-folder")
-                                    .outline()
-                                    .small()
-                                    .label("Open Folder")
-                                    .on_click(|_, _, cx| {
-                                        let Some(dir) = themes_dir() else { return };
-                                        let _ = std::fs::create_dir_all(&dir);
-                                        // With no theme of their own yet, start them off with one to edit.
-                                        let has_theme = std::fs::read_dir(&dir)
-                                            .into_iter()
-                                            .flatten()
-                                            .any(|e| {
-                                                e.is_ok_and(|e| {
-                                                    e.path()
-                                                        .extension()
-                                                        .is_some_and(|x| x == "json")
-                                                })
-                                            });
-                                        if !has_theme {
-                                            let _ = std::fs::write(
-                                                dir.join("my-theme.json"),
-                                                example_theme(cx),
-                                            );
-                                        }
-                                        cx.open_with_system(&dir);
-                                    }),
-                                cx,
-                            ),
-                        ],
-                        cx,
-                    )
-                    .into_any_element(),
-                    setting_section("LIGHT THEME", vec![cards(ThemeMode::Light, cx)], cx)
-                        .into_any_element(),
-                    setting_section("DARK THEME", vec![cards(ThemeMode::Dark, cx)], cx)
-                        .into_any_element(),
-                ]
-            }
+            0 => self.editor_page(&settings, cx),
+            1 => Self::notes_page(&settings, cx),
+            _ => Self::appearance_page(&settings, cx),
         };
+        let nav = SETTINGS_PAGES.iter().enumerate().map(|(i, (label, icon))| {
+            let on = self.tab == i;
+            h_flex()
+                .id(*label)
+                .h(px(30.))
+                .px_2()
+                .gap_2()
+                .rounded(theme.radius)
+                .text_sm()
+                .cursor_pointer()
+                .when(on, |d| {
+                    d.bg(theme.accent)
+                        .text_color(theme.accent_foreground)
+                        .font_weight(FontWeight::MEDIUM)
+                })
+                .when(!on, |d| {
+                    d.text_color(theme.muted_foreground)
+                        .hover(|s| s.bg(theme.secondary_hover).text_color(theme.foreground))
+                })
+                .child(Icon::new(icon.clone()).small())
+                .child(*label)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    window.blur(cx);
+                    this.tab = i;
+                    cx.notify();
+                }))
+        });
 
-        v_flex()
+        h_flex()
             .id("settings")
             .size_full()
+            .items_stretch()
             .text_color(theme.foreground)
+            .bg(theme.background)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
             // Controls stop propagation on their own clicks, so this only fires for
             // clicks on the window's blank space, clearing the focus ring a Select
             // trigger keeps after Confirm.
             .on_click(|_, window, cx| window.blur(cx))
             .child(
-                div()
-                    .px_6()
-                    .pt_5()
-                    .pb_4()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Settings"),
-            )
-            .child(
-                h_flex()
-                    .mx_6()
-                    .mb_5()
-                    .p(px(3.))
-                    .rounded(theme.radius_lg)
-                    .border_1()
-                    .border_color(theme.border)
+                v_flex()
+                    .flex_none()
+                    .w(px(184.))
+                    .p_2()
+                    .pt_4()
+                    .gap_0p5()
                     .bg(theme.secondary)
-                    .children(SETTINGS_TABS.iter().enumerate().map(|(i, &label)| {
-                        let on = self.tab == i;
-                        div()
-                            .id(label)
-                            .flex_1()
-                            .h(px(26.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(theme.radius)
-                            .text_sm()
-                            .when(on, |d| {
-                                d.font_weight(FontWeight::MEDIUM)
-                                    .bg(theme.background)
-                                    .shadow_sm()
-                            })
-                            .when(!on, |d| {
-                                d.text_color(theme.muted_foreground)
-                                    .hover(|s| s.text_color(theme.foreground))
-                            })
-                            .child(label)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                window.blur(cx);
-                                this.tab = i;
-                                cx.notify();
-                            }))
-                    })),
+                    .border_r_1()
+                    .border_color(theme.border)
+                    .children(nav),
             )
             .child(
                 v_flex()
-                    .id(("settings-tab", self.tab))
+                    .id(("settings-page", self.tab))
                     .flex_1()
-                    .min_h_0()
+                    .min_w_0()
                     .overflow_y_scroll()
-                    .px_6()
-                    .pb_6()
-                    .gap_5()
+                    .px_8()
+                    .pt_6()
+                    .pb_8()
+                    .gap_6()
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(SETTINGS_PAGES[self.tab].0),
+                    )
                     .children(body),
             )
     }
@@ -3223,8 +3298,12 @@ fn snapshot(out: &str, paths: Vec<PathBuf>) {
     );
     cx.update(init);
     let dark = std::env::var("NP_DARK").is_ok();
+    let snapshot_size = match std::env::var("NP_SETTINGS") {
+        Ok(_) => SETTINGS_SIZE,
+        Err(_) => size(px(900.), px(640.)),
+    };
     let win = cx
-        .open_offscreen_window(size(px(900.), px(640.)), move |window, cx| {
+        .open_offscreen_window(snapshot_size, move |window, cx| {
             Theme::change(
                 if dark {
                     gpui_kit::component::ThemeMode::Dark
@@ -3234,6 +3313,17 @@ fn snapshot(out: &str, paths: Vec<PathBuf>) {
                 Some(window),
                 cx,
             );
+            // NP_SETTINGS=<tab> renders the Settings window on that tab instead.
+            if let Some(tab) = std::env::var("NP_SETTINGS")
+                .ok()
+                .and_then(|t| t.parse().ok())
+            {
+                let view = cx.new(|cx| SettingsView {
+                    tab,
+                    ..SettingsView::new(window, cx)
+                });
+                return cx.new(|cx| Root::new(view, window, cx));
+            }
             let view = cx.new(|cx| Notepad::new(paths, window, cx));
             cx.new(|cx| Root::new(view, window, cx))
         })
