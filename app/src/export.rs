@@ -20,7 +20,7 @@ use printpdf::{
     PdfPage, PdfSaveOptions, Point, Polygon, PolygonRing, Pt, Rgb, TextItem, WindingOrder,
 };
 
-use crate::{LILEX_BOLD, LILEX_REGULAR};
+use crate::{LILEX_BOLD, LILEX_REGULAR, LINE_SPACING};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum ExportFormat {
@@ -505,28 +505,35 @@ const MARGIN_MM: f32 = 20.0;
 const INDENT_PT: f32 = 18.0;
 const QUOTE_INDENT_PT: f32 = 14.0;
 
-/// Heading sizes relative to the body text.
+/// H1–H6 sizes relative to the body text (1.125 ratio), shared with the preview.
+pub const HEADING_SCALE: [f32; 6] = [1.602, 1.424, 1.266, 1.125, 1.0, 0.889];
+pub const CODE_SCALE: f32 = 0.889;
+
 fn block_size(kind: Kind, body: f32) -> f32 {
     body * match kind {
-        Kind::Heading(1) => 1.8,
-        Kind::Heading(2) => 1.45,
-        Kind::Heading(3) => 1.2,
-        Kind::Heading(4) => 1.08,
-        Kind::Heading(5) => 1.0,
-        Kind::Heading(6) => 0.95,
-        Kind::Code => 0.92,
+        Kind::Heading(level) => HEADING_SCALE[level as usize - 1],
+        Kind::Code => CODE_SCALE,
         _ => 1.0,
     }
 }
 
-const LINE_HEIGHT: f32 = 1.4;
-
-/// Space above a block (PDF and DOCX alike): headings get more, like the preview.
-fn gap_before(kind: Kind, body: f32) -> f32 {
+fn line_height(kind: Kind) -> f32 {
     match kind {
-        Kind::Heading(_) => block_size(kind, body) * 0.9,
-        Kind::Table | Kind::Code => body * 0.75,
-        _ => body * 0.6,
+        Kind::Heading(_) => 1.25,
+        _ => LINE_SPACING,
+    }
+}
+
+/// Space above a block, for both PDF and DOCX.
+fn gap_before(prev: Option<&Block>, block: &Block, body: f32) -> f32 {
+    let Some(prev) = prev else { return 0.0 };
+    body * match (prev.kind, block.kind) {
+        (Kind::Heading(_), Kind::Heading(_)) => 0.75,
+        (_, Kind::Heading(1 | 2)) => 1.75,
+        (_, Kind::Heading(_)) => 1.25,
+        (Kind::Heading(_), _) => 0.5,
+        (Kind::Para, Kind::Para) if prev.indent > 0 && block.indent > 0 => 0.25,
+        _ => 0.75,
     }
 }
 
@@ -1097,21 +1104,16 @@ fn write_pdf(
 
     let mut pages: Vec<Vec<Op>> = vec![vec![]];
     let mut y = page_h - margin;
-    let mut first = true;
+    let mut prev = None;
 
     for block in blocks {
         let size = block_size(block.kind, body);
-        let line_h = size * LINE_HEIGHT;
+        let line_h = size * line_height(block.kind);
         let base_x = margin + block.indent as f32 * INDENT_PT;
         let x = base_x + block.quote_depth as f32 * QUOTE_INDENT_PT;
         let avail_w = (page_w - margin - x).max(60.0);
-        let gap = if first {
-            0.0
-        } else {
-            gap_before(block.kind, body)
-        };
-        first = false;
-        y -= gap;
+        y -= gap_before(prev, block, body);
+        prev = Some(block);
 
         if block.kind == Kind::Rule {
             let rule_h = body * 0.6;
@@ -1348,13 +1350,13 @@ fn write_pdf(
             draw_line(
                 ops,
                 x,
-                y - 2.0,
+                y - 4.0,
                 page_w - margin,
-                y - 2.0,
+                y - 4.0,
                 0.5,
                 &palette.border,
             );
-            y -= 4.0;
+            y -= 5.0;
         }
     }
 
@@ -1446,16 +1448,24 @@ fn write_docx(
     let file = std::fs::File::create(path).context("creating DOCX file")?;
     let half_pts = |pt: f32| (pt * 2.0).round() as usize;
     // Word's units: spacing in twentieths of a point, line height in 240ths of a line.
-    let spacing = |before: f32| {
+    // Word's line is the font's height (about 1.2em), hence the division.
+    let spacing = |kind: Kind, before: f32, after: f32| {
         LineSpacing::new()
             .before((before * 20.0).round() as u32)
-            .after(0)
-            .line((LINE_HEIGHT * 240.0) as i32)
+            .after((after * 20.0).round() as u32)
+            .line((line_height(kind) / 1.2 * 240.0).round() as i32)
             .line_rule(LineSpacingType::Auto)
     };
     let mut docx = Docx::new();
-    for block in blocks {
-        let gap = gap_before(block.kind, body);
+    let mut prev = None;
+    for (i, block) in blocks.iter().enumerate() {
+        let gap = gap_before(prev, block, body);
+        prev = Some(block);
+        // Word tables can't have space before them, so it goes after the previous block.
+        let after = match blocks.get(i + 1) {
+            Some(next) if next.kind == Kind::Table => gap_before(prev, next, body),
+            _ => 0.0,
+        };
         let total_indent = (block.indent as i32 + block.quote_depth as i32) * 360;
 
         if block.kind == Kind::Table {
@@ -1481,7 +1491,9 @@ fn write_docx(
                         Align::Center => AlignmentType::Center,
                         Align::Right => AlignmentType::Right,
                     };
-                    let mut p = Paragraph::new().align(align).line_spacing(spacing(0.0));
+                    let mut p = Paragraph::new()
+                        .align(align)
+                        .line_spacing(spacing(block.kind, 0.0, 0.0));
                     if let Some(spans) = row.get(c_idx) {
                         p = add_spans_to_paragraph(
                             p,
@@ -1555,12 +1567,15 @@ fn write_docx(
             let text = &block.spans[0].text;
             let code_size = block_size(block.kind, body);
             let is_fenced = block.kind == Kind::Code;
-            for (i, line) in text
+            let mut lines = text
                 .strip_suffix('\n')
                 .unwrap_or(text)
                 .split('\n')
                 .enumerate()
-            {
+                .peekable();
+            while let Some((i, line)) = lines.next() {
+                let before = if i == 0 { gap } else { 0.0 };
+                let after = if lines.peek().is_none() { after } else { 0.0 };
                 let mut run = Run::new()
                     .add_text(line)
                     .fonts(docx_font(code_family))
@@ -1569,7 +1584,7 @@ fn write_docx(
                     run = run.shading(Shading::new().shd_type(ShdType::Clear).fill("F3F5F7"));
                 }
                 let p = Paragraph::new()
-                    .line_spacing(spacing(if i == 0 { gap } else { 0.0 }))
+                    .line_spacing(spacing(block.kind, before, after))
                     .add_run(run)
                     .indent(Some(total_indent), None, None, None);
                 docx = docx.add_paragraph(p);
@@ -1577,12 +1592,9 @@ fn write_docx(
             continue;
         }
 
-        let mut p = Paragraph::new().line_spacing(spacing(gap)).indent(
-            Some(total_indent),
-            None,
-            None,
-            None,
-        );
+        let mut p = Paragraph::new()
+            .line_spacing(spacing(block.kind, gap, after))
+            .indent(Some(total_indent), None, None, None);
         if block.kind == Kind::Rule {
             p = p.add_run(
                 Run::new()
@@ -1702,6 +1714,16 @@ mod tests {
                 .iter()
                 .any(|b| b.spans.iter().any(|s| s.text == "Footnote body."))
         );
+    }
+
+    #[test]
+    fn heading_scale_and_block_gaps() {
+        assert!(HEADING_SCALE.is_sorted_by(|a, b| a > b));
+        let blocks = markdown_blocks("# A\n\ntext\n\n## B\n\ntext\n\n- one\n- two\n");
+        let gap = |i: usize| gap_before(i.checked_sub(1).map(|p| &blocks[p]), &blocks[i], 12.0);
+        assert_eq!(gap(0), 0.0);
+        assert!(gap(2) > gap(3));
+        assert!(gap(5) < gap(4));
     }
 
     #[test]
