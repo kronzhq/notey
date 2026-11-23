@@ -269,17 +269,18 @@ fn note_links(path: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Sidebar rows for a scan. Notes drop `.md`; other files keep their extension.
+/// Sidebar rows for a scan. All files keep their extension.
 fn tree_items(found: Vec<Found>, expanded: &HashSet<SharedString>) -> Vec<TreeItem> {
     found
         .into_iter()
         .map(|found| {
             let id: SharedString = found.path.to_string_lossy().into_owned().into();
-            let name = match &found.children {
-                None if is_markdown(&found.path) => found.path.file_stem(),
-                _ => found.path.file_name(),
-            };
-            let name = name.unwrap_or_default().to_string_lossy().into_owned();
+            let name = found
+                .path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
             match found.children {
                 Some(children) => TreeItem::new(id.clone(), name)
                     .expanded(expanded.contains(&id))
@@ -1420,7 +1421,13 @@ impl Notepad {
                 dialog
                     .title("New Note")
                     .w(px(320.))
-                    .child(v_flex().gap_2().child("Name:").child(Input::new(&input)))
+                    .child(
+                        v_flex()
+                            .gap_2()
+                            .pb_1()
+                            .child("Name:")
+                            .child(Input::new(&input)),
+                    )
                     .footer(
                         DialogFooter::new()
                             .gap_2()
@@ -1513,7 +1520,7 @@ impl Notepad {
                 .px_3()
                 .text_sm()
                 .child(
-                    path.file_stem()
+                    path.file_name()
                         .unwrap_or_default()
                         .to_string_lossy()
                         .into_owned(),
@@ -1696,6 +1703,7 @@ impl Notepad {
                     .child(
                         v_flex()
                             .gap_2()
+                            .pb_1()
                             .child("Line number:")
                             .child(Input::new(&input)),
                     )
