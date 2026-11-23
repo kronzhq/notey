@@ -20,7 +20,7 @@ use printpdf::{
     PdfPage, PdfSaveOptions, Point, Polygon, PolygonRing, Pt, Rgb, TextItem, WindingOrder,
 };
 
-use crate::{LILEX_BOLD, LILEX_REGULAR, LINE_SPACING};
+use crate::{LILEX_BOLD, LILEX_REGULAR, LINE_SPACING, SYSTEM_FONT};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum ExportFormat {
@@ -50,11 +50,21 @@ impl ExportFormat {
         } else {
             vec![Block::plain_code(text)]
         };
+        let family = export_family(family);
         let code_family = if markdown { "Lilex" } else { family };
         match self {
             ExportFormat::Pdf => write_pdf(&blocks, family, code_family, size, path),
             ExportFormat::Docx => write_docx(&blocks, family, code_family, size, path),
         }
+    }
+}
+
+/// The system font is one variable file (its bold would print regular) and Word can't
+/// resolve its hidden name, so exports use the closest font with real faces.
+fn export_family(family: &str) -> &str {
+    match family {
+        SYSTEM_FONT => "Helvetica Neue",
+        _ => family,
     }
 }
 
@@ -505,9 +515,10 @@ const MARGIN_MM: f32 = 20.0;
 const INDENT_PT: f32 = 18.0;
 const QUOTE_INDENT_PT: f32 = 14.0;
 
-/// H1–H6 sizes relative to the body text (1.125 ratio), shared with the preview.
-pub const HEADING_SCALE: [f32; 6] = [1.602, 1.424, 1.266, 1.125, 1.0, 0.889];
-pub const CODE_SCALE: f32 = 0.889;
+/// H1–H6 sizes relative to the body text, shared with the preview. Steps of 1/8, so
+/// the default 16px body gives whole pixels: 32, 24, 20, 18, 16, 14.
+pub const HEADING_SCALE: [f32; 6] = [2.0, 1.5, 1.25, 1.125, 1.0, 0.875];
+pub const CODE_SCALE: f32 = 0.875;
 
 fn block_size(kind: Kind, body: f32) -> f32 {
     body * match kind {
@@ -1744,6 +1755,10 @@ mod tests {
         let [r, b, ..] = family_faces("Menlo");
         assert!(matches!(r, Source::File(..)));
         assert_ne!(r, b);
+        // The system font exports with four real faces.
+        let faces = family_faces(export_family(SYSTEM_FONT));
+        assert!(faces.iter().all(|f| matches!(f, Source::File(..))));
+        assert!((1..4).all(|i| !faces[..i].contains(&faces[i])));
         assert_eq!(
             family_faces("No Such Font")[0],
             Source::Lilex { bold: false }
@@ -1798,6 +1813,8 @@ mod tests {
             (false, "Menlo"),
             (true, "Helvetica Neue"),
             (true, "Lilex"),
+            (true, SYSTEM_FONT),
+            (false, SYSTEM_FONT),
             (false, "No Such Font"),
         ] {
             let write =

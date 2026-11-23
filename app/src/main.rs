@@ -23,7 +23,7 @@ use gpui_kit::component::{
     list::ListItem,
     menu::{DropdownMenu as _, PopupMenu},
     resizable::{h_resizable, resizable_panel},
-    searchable_list::SearchableVec,
+    searchable_list::{SearchableListItem, SearchableVec},
     select::{Select, SelectEvent, SelectState},
     switch::Switch,
     tab::{Tab, TabBar},
@@ -306,9 +306,14 @@ struct NotesFolder {
     _subscription: Subscription,
 }
 
+/// The themes' font; the editor defaults to `SYSTEM_FONT`.
 const DEFAULT_FONT: &str = "Lilex";
+/// San Francisco. macOS hides it from font lists, but this name resolves in gpui and CoreText.
+const SYSTEM_FONT: &str = ".AppleSystemUIFont";
 /// Line height as a multiple of the editor font size.
 const LINE_SPACING: f32 = 1.45;
+/// The preview is for reading, so its prose gets more room than the editor.
+const PREVIEW_LINE_SPACING: f32 = 1.625;
 const FONT_SIZES: [u32; 16] = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72];
 
 /// Bundled themes; JSON files in the themes folder add more or replace these by name.
@@ -330,6 +335,8 @@ struct Settings {
     /// Open markdown files with the preview shown.
     preview: bool,
     font_family: SharedString,
+    /// Interface font; empty follows the theme's.
+    app_font: SharedString,
     /// Font size in points.
     font_size: f32,
     /// The notes folder new windows open.
@@ -351,7 +358,8 @@ impl Default for Settings {
             word_wrap: true,
             status_bar: true,
             preview: true,
-            font_family: DEFAULT_FONT.into(),
+            font_family: SYSTEM_FONT.into(),
+            app_font: SharedString::default(),
             font_size: 12.,
             folder: None,
             folders: Vec::new(),
@@ -632,9 +640,17 @@ fn apply_appearance(cx: &mut App) {
     };
     // The default, or a theme file that's gone (or not loaded yet), is our palette.
     let pick = |name: &SharedString, mode| {
-        find_theme(name, cx)
+        let mut theme = find_theme(name, cx)
             .filter(|t| t.mode == mode)
-            .unwrap_or_else(|| default_theme(mode, ThemeRegistry::global(cx)))
+            .unwrap_or_else(|| default_theme(mode, ThemeRegistry::global(cx)));
+        // Always set: the kit keeps the previous font for a theme that names none.
+        let config = Rc::make_mut(&mut theme);
+        if !settings.app_font.is_empty() {
+            config.font_family = Some(settings.app_font.clone());
+        } else if config.font_family.is_none() {
+            config.font_family = Some(DEFAULT_FONT.into());
+        }
+        theme
     };
     let light = pick(&settings.light_theme, ThemeMode::Light);
     let dark_theme = pick(&settings.dark_theme, ThemeMode::Dark);
@@ -2067,7 +2083,9 @@ impl Render for Notepad {
             })
             .font_family(settings.font_family.clone())
             .text_size(px(font_px))
-            .line_height(relative(LINE_SPACING))
+            .line_height(relative(PREVIEW_LINE_SPACING))
+            // On the view, not the panel: the scrollbar overlays this padding at the edge.
+            .pr_6()
             // Inline code defaults to the blue `accent` (it tints links in tables), and
             // header text to `muted_foreground`, which reads as disabled.
             // Headings scale from their own base (fixed 14px), not `text_size`, so feed it the font too.
@@ -2081,7 +2099,13 @@ impl Render for Notepad {
                 })
                 // Rems follow the UI font size, not the note's font and zoom.
                 .paragraph_gap(rems(px(font_px) / theme.font_size))
-                .code_block(StyleRefinement::default().text_size(px(font_px * export::CODE_SCALE)))
+                .code_block(
+                    StyleRefinement::default()
+                        .text_size(px(font_px * export::CODE_SCALE))
+                        .line_height(relative(LINE_SPACING))
+                        .p_4()
+                        .rounded(theme.radius),
+                )
                 .inline_code(HighlightStyle {
                     background_color: Some(theme.muted),
                     ..Default::default()
@@ -2218,10 +2242,10 @@ impl Render for Notepad {
                                             .child(resizable_panel().child(textarea))
                                             // No `pr_*`: the scrollbar is painted inset to the
                                             // panel's own bounds, so right padding here would
-                                            // pull it away from the window edge.
+                                            // pull it away from the window edge (see `preview`).
                                             .child(
                                                 resizable_panel()
-                                                    .pl_4()
+                                                    .pl_6()
                                                     .py_2()
                                                     .child(preview.size_full()),
                                             ),
@@ -2891,10 +2915,31 @@ const SETTINGS_PAGES: [(&str, IconName); 3] = [
 ];
 const SETTINGS_SIZE: Size<Pixels> = size(px(720.), px(540.));
 
+/// A font family in a Settings picker; the special ones get readable names.
+#[derive(Clone)]
+struct FontItem(SharedString);
+
+impl SearchableListItem for FontItem {
+    type Value = SharedString;
+
+    fn title(&self) -> SharedString {
+        match self.0.as_str() {
+            "" => "Theme default".into(),
+            SYSTEM_FONT => "System".into(),
+            _ => self.0.clone(),
+        }
+    }
+
+    fn value(&self) -> &SharedString {
+        &self.0
+    }
+}
+
 struct SettingsView {
     /// Index into `SETTINGS_PAGES`.
     tab: usize,
-    font_family: Entity<SelectState<SearchableVec<String>>>,
+    font_family: Entity<SelectState<SearchableVec<FontItem>>>,
+    app_font: Entity<SelectState<SearchableVec<FontItem>>>,
     font_size: Entity<SelectState<Vec<String>>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -2924,16 +2969,25 @@ impl SettingsView {
         let mut families = cx.text_system().all_font_names();
         families.sort();
         families.dedup();
-        let family_ix = families.iter().position(|f| *f == *settings.font_family);
-        let font_family = cx.new(|cx| {
-            SelectState::new(
-                SearchableVec::new(families),
-                family_ix.map(IndexPath::new),
-                window,
-                cx,
-            )
-            .searchable(true)
-        });
+        families.insert(0, SYSTEM_FONT.into());
+        let families: Vec<_> = families.into_iter().map(|f| FontItem(f.into())).collect();
+        let mut font_select = |items: Vec<FontItem>, chosen: &SharedString| {
+            let ix = items.iter().position(|f| f.0 == *chosen);
+            cx.new(|cx| {
+                SelectState::new(
+                    SearchableVec::new(items),
+                    ix.map(IndexPath::new),
+                    window,
+                    cx,
+                )
+                .searchable(true)
+            })
+        };
+        let font_family = font_select(families.clone(), &settings.font_family);
+        let app_fonts = std::iter::once(FontItem("".into()))
+            .chain(families)
+            .collect();
+        let app_font = font_select(app_fonts, &settings.app_font);
         let sizes: Vec<String> = FONT_SIZES.iter().map(u32::to_string).collect();
         let size_ix = FONT_SIZES
             .iter()
@@ -2945,10 +2999,20 @@ impl SettingsView {
         let subscriptions = vec![
             cx.subscribe(
                 &font_family,
-                |_, _, event: &SelectEvent<SearchableVec<String>>, cx| {
+                |_, _, event: &SelectEvent<SearchableVec<FontItem>>, cx| {
                     if let SelectEvent::Confirm(Some(family)) = event {
-                        let family = SharedString::from(family.clone());
+                        let family = family.clone();
                         cx.update_global::<Settings, _>(|s, _| s.font_family = family);
+                    }
+                },
+            ),
+            cx.subscribe(
+                &app_font,
+                |_, _, event: &SelectEvent<SearchableVec<FontItem>>, cx| {
+                    if let SelectEvent::Confirm(Some(family)) = event {
+                        let family = family.clone();
+                        cx.update_global::<Settings, _>(|s, _| s.app_font = family);
+                        apply_appearance(cx);
                     }
                 },
             ),
@@ -2966,6 +3030,7 @@ impl SettingsView {
         Self {
             tab: 0,
             font_family,
+            app_font,
             font_size,
             _subscriptions: subscriptions,
         }
@@ -3133,8 +3198,8 @@ impl SettingsView {
                 None,
                 vec![
                     setting_row(
-                        "Font",
-                        "Family and size",
+                        "Editor font",
+                        "Family and size for notes",
                         h_flex()
                             .gap_2()
                             .child(div().w(px(160.)).child(Select::new(&self.font_family)))
@@ -3250,7 +3315,7 @@ impl SettingsView {
         ]
     }
 
-    fn appearance_page(settings: &Settings, cx: &App) -> Vec<AnyElement> {
+    fn appearance_page(&self, settings: &Settings, cx: &App) -> Vec<AnyElement> {
         let theme_ix = Appearance::ALL
             .iter()
             .position(|&a| a == settings.appearance);
@@ -3306,6 +3371,12 @@ impl SettingsView {
                         cx,
                     ),
                     setting_row(
+                        "App font",
+                        "Menus, tabs, sidebar and settings",
+                        div().w(px(160.)).child(Select::new(&self.app_font)),
+                        cx,
+                    ),
+                    setting_row(
                         "Custom themes",
                         "JSON theme files in this folder apply as you save them",
                         Button::new("themes-folder")
@@ -3349,7 +3420,7 @@ impl Render for SettingsView {
         let body = match self.tab {
             0 => self.editor_page(&settings, cx),
             1 => Self::notes_page(&settings, cx),
-            _ => Self::appearance_page(&settings, cx),
+            _ => self.appearance_page(&settings, cx),
         };
         let nav = SETTINGS_PAGES.iter().enumerate().map(|(i, (label, icon))| {
             let on = self.tab == i;
@@ -3708,6 +3779,16 @@ mod ui_tests {
             super::apply_appearance(cx);
             let dracula: gpui_kit::Hsla = gpui_kit::rgb(0x282a36).into();
             assert_eq!(cx.theme().background, dracula);
+
+            // The app font overrides the theme's until it's set back to the default.
+            assert_eq!(cx.theme().font_family, super::DEFAULT_FONT);
+            cx.global_mut::<super::Settings>().app_font = super::SYSTEM_FONT.into();
+            super::apply_appearance(cx);
+            assert_eq!(cx.theme().font_family, super::SYSTEM_FONT);
+            assert_eq!(cx.theme().background, dracula);
+            cx.global_mut::<super::Settings>().app_font = "".into();
+            super::apply_appearance(cx);
+            assert_eq!(cx.theme().font_family, super::DEFAULT_FONT);
         });
     }
 
