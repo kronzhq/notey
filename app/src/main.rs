@@ -97,37 +97,61 @@ const OPEN_FILES: PathPromptOptions = PathPromptOptions {
     prompt: None,
 };
 
-/// The Notion-style `/` menu in markdown tabs: label, search keys, and the markdown
-/// it inserts (`|` marks where the cursor lands, else the end).
-const BLOCKS: [(&str, &str, &str); 9] = [
+/// `/` menu items: label, search keys, markdown. `«»` marks what gets selected.
+const BLOCKS: [(&str, &str, &str); 21] = [
     ("Heading 1", "heading1 h1 title", "# "),
     ("Heading 2", "heading2 h2", "## "),
     ("Heading 3", "heading3 h3", "### "),
+    ("Heading 4", "heading4 h4", "#### "),
+    ("Heading 5", "heading5 h5", "##### "),
+    ("Heading 6", "heading6 h6", "###### "),
     ("Bulleted list", "bulletedlist ul", "- "),
     ("Numbered list", "numberedlist ol", "1. "),
     ("To-do list", "todolist checkbox task", "- [ ] "),
+    (
+        "Table",
+        "table grid columns rows",
+        "| «Column 1» | Column 2 |\n| --- | --- |\n|  |  |\n",
+    ),
     ("Quote", "quote blockquote", "> "),
-    ("Code block", "codeblock pre", "```\n|\n```"),
+    ("Code block", "codeblock pre", "```\n«»\n```"),
     ("Divider", "divider hr line", "---\n"),
+    ("Footnote text", "footnotetext definition", "[^«1»]: "),
+    ("Bold", "bold strong", "**«bold»**"),
+    ("Italic", "italic emphasis", "*«italic»*"),
+    ("Strikethrough", "strikethrough delete", "~~«text»~~"),
+    ("Inline code", "inlinecode", "`«code»`"),
+    ("Link", "link url", "[«text»](url)"),
+    ("Image", "image picture img", "![«alt»](url)"),
+    ("Footnote", "footnote reference", "[^«1»]"),
 ];
 
-/// A `/query` typed at the start of a line (after any indent): the `/`'s byte
-/// offset in `line` and the query.
-fn slash_query(line: &str) -> Option<(usize, &str)> {
-    let start = line.len() - line.trim_start().len();
-    let query = line[start..].strip_prefix('/')?;
-    query
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric())
-        .then_some((start, query))
+/// Index of the first inline item in `BLOCKS`.
+const INLINE_BLOCKS: usize = 14;
+
+/// The `/`'s byte offset in `line`, the query, and whether text precedes it.
+fn slash_query(line: &str) -> Option<(usize, &str, bool)> {
+    let start = line.rfind('/')?;
+    let (before, query) = (&line[..start], &line[start + 1..]);
+    let inline = !before.trim().is_empty();
+    // Mid-line needs a letter, so Enter after "ls /" stays a newline.
+    let opens = !inline || (before.ends_with(char::is_whitespace) && !query.is_empty());
+    (opens && query.chars().all(|c| c.is_ascii_alphanumeric())).then_some((start, query, inline))
 }
 
 /// Indexes into `BLOCKS` whose keys contain the query.
-fn slash_matches(query: &str) -> Vec<usize> {
+fn slash_matches(query: &str, inline: bool) -> Vec<usize> {
     let query = query.to_ascii_lowercase();
-    (0..BLOCKS.len())
+    let first = if inline { INLINE_BLOCKS } else { 0 };
+    (first..BLOCKS.len())
         .filter(|&ix| BLOCKS[ix].1.contains(&query))
         .collect()
+}
+
+fn slash_parts(insert: &str) -> (&str, &str, &str) {
+    let (before, rest) = insert.split_once('«').unwrap_or((insert, ""));
+    let (placeholder, after) = rest.split_once('»').unwrap_or((rest, ""));
+    (before, placeholder, after)
 }
 
 fn is_markdown(path: &Path) -> bool {
@@ -174,6 +198,91 @@ fn wikify(text: &str) -> String {
     }
     out.push_str(&text[last..]);
     out
+}
+
+/// The file an image link points at, relative to the note's folder; `None` for web links.
+fn image_path(url: &str, dir: &Path) -> Option<PathBuf> {
+    let path = url.strip_prefix("file://").unwrap_or(url);
+    (!path.contains("://"))
+        .then(|| url_to_path(&format!("file://{path}")))?
+        .map(|path| dir.join(path))
+}
+
+/// Makes image links absolute paths, which `LocalImages` serves.
+fn localize_images(text: &str, dir: &Path) -> String {
+    use markdown::mdast::Node;
+    fn images(node: &Node, dir: &Path, out: &mut Vec<(std::ops::Range<usize>, String)>) {
+        if let Node::Image(image) = node
+            && let Some(pos) = &image.position
+            && let Some(path) = image_path(&image.url, dir).filter(|path| path.is_file())
+        {
+            let mut link = String::from("![](");
+            for b in path.to_string_lossy().bytes() {
+                match b {
+                    b'/' | b'.' | b'-' | b'_' => link.push(b as char),
+                    b if b.is_ascii_alphanumeric() => link.push(b as char),
+                    b => link.push_str(&format!("%{b:02X}")),
+                }
+            }
+            link.push(')');
+            out.push((pos.start.offset..pos.end.offset, link));
+        }
+        for child in node.children().into_iter().flatten() {
+            images(child, dir, out);
+        }
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut fenced = false;
+    // ponytail: only lines with images get parsed (a whole note is too slow per keystroke),
+    // so an image split across lines stays as is.
+    for line in text.split_inclusive('\n') {
+        let start = out.len() + line.len() - line.trim_start().len();
+        out.push_str(line);
+        let line = line.trim_start();
+        let inner = line.trim_start_matches(['>', ' ']);
+        fenced ^= (inner.starts_with("```") && !inner.trim_start_matches('`').contains('`'))
+            || inner.starts_with("~~~");
+        if fenced || !line.contains("![") {
+            continue;
+        }
+        let mut found = Vec::new();
+        if let Ok(root) = markdown::to_mdast(line, &markdown::ParseOptions::gfm()) {
+            images(&root, dir, &mut found);
+        }
+        for (range, link) in found.into_iter().rev() {
+            out.replace_range(start + range.start..start + range.end, &link);
+        }
+    }
+    out
+}
+
+/// The preview fetches every image over HTTP; this answers for local paths only.
+struct LocalImages;
+
+impl http_client::HttpClient for LocalImages {
+    fn send(
+        &self,
+        req: http_client::Request<http_client::AsyncBody>,
+    ) -> std::pin::Pin<
+        Box<dyn Future<Output = Result<http_client::Response<http_client::AsyncBody>>> + Send>,
+    > {
+        Box::pin(async move {
+            let uri = req.uri();
+            let path = url_to_path(&format!("file://{}", uri.path()))
+                // Regular files only: reading /dev/zero never ends.
+                .filter(|path| uri.host().is_none() && path.is_file())
+                .ok_or_else(|| anyhow::anyhow!("not a local image: {uri}"))?;
+            Ok(http_client::Response::new(std::fs::read(path)?.into()))
+        })
+    }
+
+    fn user_agent(&self) -> Option<&http_client::http::HeaderValue> {
+        None
+    }
+
+    fn proxy(&self) -> Option<&http_client::Url> {
+        None
+    }
 }
 
 /// Whether a lowercased link target names `path`, by file name or path inside `dir`.
@@ -741,6 +850,7 @@ struct Notepad {
     prompting: bool,
     /// Highlighted row of the `/` menu.
     slash_selected: usize,
+    slash_scroll: ScrollHandle,
     /// The `/` whose menu Escape closed, so typing on doesn't reopen it.
     slash_dismissed: Option<usize>,
     folder: Option<NotesFolder>,
@@ -790,6 +900,7 @@ impl Notepad {
             zoom: 100,
             prompting: false,
             slash_selected: 0,
+            slash_scroll: ScrollHandle::new(),
             slash_dismissed: None,
             folder: None,
             sidebar: true,
@@ -872,6 +983,7 @@ impl Notepad {
             cx.subscribe_in(&editor, window, |this, editor, event, window, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.slash_selected = 0;
+                    this.slash_scroll.scroll_to_item(0);
                     // Deleting the dismissed `/` lets a new one open the menu again.
                     if this.slash_trigger(cx).map(|t| t.0) != this.slash_dismissed {
                         this.slash_dismissed = None;
@@ -1014,6 +1126,8 @@ impl Notepad {
         doc.saved = doc.editor.read(cx).text().clone();
         let was_markdown = doc.is_markdown();
         (doc.path, doc.dirty) = (Some(path), false);
+        // Relative images may now be in another folder.
+        doc.preview_text = None;
         // Saving as .md applies the preview setting; a re-save keeps the tab's toggle.
         if !was_markdown && doc.is_markdown() {
             doc.preview = cx.global::<Settings>().preview;
@@ -1772,8 +1886,8 @@ impl Notepad {
 
     // ---- `/` menu ----
 
-    /// A `/query` before the cursor in a markdown tab: the `/`'s offset and the query.
-    fn slash_trigger(&self, cx: &App) -> Option<(usize, String)> {
+    /// `slash_query` at the cursor, with a document offset.
+    fn slash_trigger(&self, cx: &App) -> Option<(usize, String, bool)> {
         let doc = self.doc();
         if !doc.is_markdown() {
             return None;
@@ -1786,14 +1900,14 @@ impl Notepad {
         let text = editor.text();
         let line_start = text.line_start_offset(text.offset_to_point(cursor.end).row);
         let line = text.slice(line_start..cursor.end).to_string();
-        let (col, query) = slash_query(&line)?;
-        Some((line_start + col, query.to_string()))
+        let (col, query, inline) = slash_query(&line)?;
+        Some((line_start + col, query.to_string(), inline))
     }
 
     /// The open menu: the `/`'s offset and the matching `BLOCKS`.
     fn slash_menu(&self, cx: &App) -> Option<(usize, Vec<usize>)> {
-        let (start, query) = self.slash_trigger(cx)?;
-        let matches = slash_matches(&query);
+        let (start, query, inline) = self.slash_trigger(cx)?;
+        let matches = slash_matches(&query, inline);
         (Some(start) != self.slash_dismissed && !matches.is_empty()).then_some((start, matches))
     }
 
@@ -1803,14 +1917,14 @@ impl Notepad {
             return;
         };
         let insert = BLOCKS[matches[row.min(matches.len() - 1)]].2;
-        let (before, after) = insert.split_once('|').unwrap_or((insert, ""));
+        let (before, placeholder, after) = slash_parts(insert);
         let editor = self.editor();
         editor.update(cx, |editor, cx| {
             let end = editor.cursor();
             editor.set_selected_range(start..end, cx);
-            editor.replace(format!("{before}{after}"), window, cx);
+            editor.replace(format!("{before}{placeholder}{after}"), window, cx);
             let cursor = start + before.len();
-            editor.set_selected_range(cursor..cursor, cx);
+            editor.set_selected_range(cursor..cursor + placeholder.len(), cx);
         });
         self.refresh_dirty(editor.entity_id(), window, cx);
     }
@@ -1829,6 +1943,7 @@ impl Notepad {
             SlashKey::Accept => self.slash_apply(self.slash_selected, window, cx),
             SlashKey::Dismiss => self.slash_dismissed = Some(start),
         }
+        self.slash_scroll.scroll_to_item(self.slash_selected);
         cx.notify();
     }
 
@@ -1838,6 +1953,10 @@ impl Notepad {
         v_flex()
             .id("slash-menu")
             .w(px(240.))
+            .max_h(px(320.))
+            .overflow_y_scroll()
+            .track_scroll(&self.slash_scroll)
+            .occlude()
             .p_1()
             .text_sm()
             .bg(theme.popover)
@@ -1846,9 +1965,15 @@ impl Notepad {
             .rounded(theme.radius)
             .children(matches.iter().enumerate().map(|(row, &ix)| {
                 let (label, _, insert) = BLOCKS[ix];
-                let hint = insert.lines().next().unwrap_or_default().trim();
+                let hint = slash_parts(insert)
+                    .0
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .trim();
                 h_flex()
                     .id(("slash", row))
+                    .flex_none()
                     .justify_between()
                     .px_2()
                     .py_1()
@@ -2020,7 +2145,15 @@ impl Render for Notepad {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let doc = &mut self.docs[self.active];
         if doc.preview && doc.is_markdown() && doc.preview_text.is_none() {
-            doc.preview_text = Some(wikify(&doc.editor.read(cx).value()).into());
+            let text = wikify(&doc.editor.read(cx).value());
+            let dir = doc.path.as_deref().and_then(Path::parent);
+            doc.preview_text = Some(
+                match dir {
+                    Some(dir) => localize_images(&text, dir),
+                    None => text,
+                }
+                .into(),
+            );
         }
         let settings = cx.global::<Settings>().clone();
         let font_px = settings.font_size * 4. / 3. * self.zoom as f32 / 100.;
@@ -2662,6 +2795,7 @@ fn load_fonts(cx: &App) {
 /// Everything except opening a window; shared with the UI tests.
 fn init(cx: &mut App) {
     gpui_kit::init(cx);
+    cx.set_http_client(std::sync::Arc::new(LocalImages));
     load_fonts(cx);
     cx.set_global(load_settings());
     cx.observe_global::<Settings>(save_settings).detach();
@@ -3720,6 +3854,8 @@ mod ui_tests {
 
     #[gpui_kit::test]
     fn custom_themes_keep_the_bundled_ones(cx: &mut TestAppContext) {
+        // The directory watcher wakes us from its own thread.
+        cx.executor().allow_parking();
         open(cx);
         let dir = std::env::temp_dir().join(format!("np-themes-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -3879,14 +4015,61 @@ mod ui_tests {
     }
 
     #[test]
-    fn slash_query_only_at_line_start() {
+    fn slash_query_matches_blocks() {
         use super::{slash_matches, slash_query};
-        assert_eq!(slash_query("/h1"), Some((0, "h1")));
-        assert_eq!(slash_query("  /"), Some((2, "")));
+        assert_eq!(slash_query("/h1"), Some((0, "h1", false)));
+        assert_eq!(slash_query("  /"), Some((2, "", false)));
         assert_eq!(slash_query("and/or"), None);
         assert_eq!(slash_query("/usr/bin"), None);
-        assert_eq!(slash_matches("").len(), 9);
-        assert_eq!(slash_matches("List").len(), 3);
+        assert_eq!(slash_query("see /li"), Some((4, "li", true)));
+        assert_eq!(slash_query("ls /"), None);
+        assert_eq!(slash_matches("", false).len(), super::BLOCKS.len());
+        assert_eq!(slash_matches("List", false).len(), 3);
+        assert_eq!(super::BLOCKS[super::INLINE_BLOCKS].0, "Bold");
+        assert!(slash_matches("heading", true).is_empty());
+        assert_eq!(slash_matches("foot", true).len(), 1);
+    }
+
+    #[test]
+    fn local_images_resolve_against_the_note() {
+        use super::localize_images;
+        let dir = std::env::temp_dir().join(format!("notepad-images-{} (a)", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("my pic.png"), "").unwrap();
+        let encoded = dir
+            .to_string_lossy()
+            .replace(' ', "%20")
+            .replace('(', "%28")
+            .replace(')', "%29");
+        let pic = dir.join("my pic.png");
+        for (text, want) in [
+            ("![a](my%20pic.png)".to_string(), "IMG"),
+            ("x ![a](<my pic.png>) y".to_string(), "x IMG y"),
+            (
+                "[![a](./my%20pic.png \"t\")](https://a.b)".to_string(),
+                "[IMG](https://a.b)",
+            ),
+            (format!("![a](<file://{}>)", pic.display()), "IMG"),
+            (
+                "```\n```\n- é\n    ![a](my%20pic.png)\n| ![b](my%20pic.png) | x |".into(),
+                "```\n```\n- é\n    IMG\n| IMG | x |",
+            ),
+        ] {
+            let image = format!("![]({encoded}/my%20pic.png)");
+            let got = localize_images(&text, &dir).replace("/./", "/");
+            assert_eq!(got, want.replace("IMG", &image), "{text}");
+        }
+        // Missing files, web images and code stay as written.
+        for text in [
+            "![a](gone.png)",
+            "![a](https://example.com/my%20pic.png)",
+            "`![a](my%20pic.png)`",
+            "```md\n![a](my%20pic.png)\n```\n",
+            "![a](/dev/zero)",
+        ] {
+            assert_eq!(localize_images(text, &dir), text);
+        }
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -4026,6 +4209,18 @@ mod ui_tests {
             cx.run_until_parked();
         }
         assert_eq!(text(cx), "## \n/\n");
+        for keys in ["/", "t", "a", "b", "l", "e", "enter", "x"] {
+            cx.update_window(handle, |_, window, cx| {
+                window.press(keys, cx);
+                window.render_frame(cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+        }
+        assert_eq!(
+            text(cx),
+            "## \n/\n| x | Column 2 |\n| --- | --- |\n|  |  |\n"
+        );
         std::fs::remove_file(md).ok();
     }
 
